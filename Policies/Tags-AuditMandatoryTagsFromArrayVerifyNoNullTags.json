@@ -1,0 +1,59 @@
+{
+    "mode": "All",
+    "policyRule": {
+        "if": {
+            "allOf": [
+                {
+                    "field": "type",
+                    "equals": "Microsoft.Resources/subscriptions/resourceGroups"
+                },
+                {
+                    "anyOf": [
+                        {
+                            "not": {
+                                "count": {
+                                    "value": "[parameters('mandatoryTags')]",
+                                    "name": "tagcount",
+                                    "where": {
+                                        "field": "tags",
+                                        "containsKey": "[current('tagcount')]"
+                                    }
+                                },
+                                "equals": "[length(parameters('mandatoryTags'))]"
+                            }
+                        },
+                        {
+                            "not": {
+                                "count": {
+                                    "value": "[parameters('mandatoryTags')]",
+                                    "name": "tagnullcount",
+                                    "where": {
+                                        "value": "[resourceGroup().tags[current('tagnullcount')]]",
+                                        "notMatch": ""
+                                    }
+                                },
+                                "equals": "[length(parameters('mandatoryTags'))]"
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+        "then": {
+            "effect": "audit"
+        }
+    },
+    "parameters": {
+        "mandatoryTags": {
+            "type": "Array",
+            "metadata": {
+                "displayName": "Array of mandatory tags",
+                "description": "Array of mandatory tags that must be present on the resource group."
+            },
+            "defaultValue": [
+                "CostCenter",
+                "ProductionTier"
+            ]
+        }
+    }
+}
