@@ -2,6 +2,14 @@
 
 This folder contains an Azure Monitor Workbook template focused on FinOps visibility and optimization.
 
+## Attribution
+
+This workbook is based on and adapted from work in the original repository:
+
+- https://github.com/ms-sambell/azure-finops-workbook
+
+This folder contains a forked/derived version tailored for this repository's structure and use cases.
+
 ## Contents
 
 - `workbook.json`: Workbook template JSON for Azure Monitor Workbooks.
