@@ -1,6 +1,6 @@
 # Azure Files AD DS domain join
 
-This project separates the long-lived Azure Automation and Hybrid Runbook Worker platform from repeatable Azure Files storage-account deployments.
+This project contains two Terraform deployments. The first creates an Azure Automation account and Hybrid Runbook Worker that can perform Azure Files domain joins. The second is a reusable template for deploying domain-joined Azure file shares.
 
 ## Problem statement
 
