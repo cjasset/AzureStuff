@@ -1,0 +1,173 @@
+#requires -Version 5.1
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string] $SubscriptionId,
+
+    [Parameter(Mandatory = $true)]
+    [string] $KeyVaultName,
+
+    [Parameter(Mandatory = $true)]
+    [string] $DomainUsernameSecretName,
+
+    [Parameter(Mandatory = $true)]
+    [string] $DomainPasswordSecretName,
+
+    [Parameter(Mandatory = $true)]
+    [string] $StorageAccountResourceGroupName,
+
+    [Parameter(Mandatory = $true)]
+    [string] $StorageAccountName,
+
+    [Parameter(Mandatory = $true)]
+    [string] $SamAccountName,
+
+    [Parameter(Mandatory = $true)]
+    [string] $DomainFqdn,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('ComputerAccount', 'ServiceLogonAccount')]
+    [string] $DomainAccountType = 'ComputerAccount',
+
+    [Parameter(Mandatory = $false)]
+    [string] $OrganizationalUnitDistinguishedName
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$workingDirectory = Join-Path $env:ProgramData ("AzureFilesDomainJoin\Jobs\{0}" -f [Guid]::NewGuid())
+$joinScriptPath = Join-Path $workingDirectory 'Invoke-AzureFilesDomainJoin.ps1'
+$launcherPath = Join-Path $workingDirectory 'Invoke-AzureFilesDomainJoin.cmd'
+$stdoutPath = Join-Path $workingDirectory 'stdout.log'
+$stderrPath = Join-Path $workingDirectory 'stderr.log'
+$taskName = "AzureFilesDomainJoin-$([Guid]::NewGuid())"
+
+try {
+    if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5) {
+        throw 'This runbook requires Windows PowerShell 5.1.'
+    }
+
+    New-Item -ItemType Directory -Path $workingDirectory -Force | Out-Null
+    [IO.File]::WriteAllBytes($joinScriptPath, [Convert]::FromBase64String('__JOIN_SCRIPT_BASE64__'))
+
+    Import-Module Az.Accounts -ErrorAction Stop
+    Import-Module Az.KeyVault -ErrorAction Stop
+
+    Disable-AzContextAutosave -Scope Process | Out-Null
+    $azureContext = (Connect-AzAccount -Identity -ErrorAction Stop).Context
+    $azureContext = Set-AzContext -SubscriptionId $SubscriptionId -DefaultProfile $azureContext -ErrorAction Stop
+
+    Write-Output "Retrieving AD DS credential secrets from Key Vault '$KeyVaultName' by managed identity."
+    $username = Get-AzKeyVaultSecret `
+        -VaultName $KeyVaultName `
+        -Name $DomainUsernameSecretName `
+        -AsPlainText `
+        -DefaultProfile $azureContext `
+        -ErrorAction Stop
+    $passwordSecret = Get-AzKeyVaultSecret `
+        -VaultName $KeyVaultName `
+        -Name $DomainPasswordSecretName `
+        -DefaultProfile $azureContext `
+        -ErrorAction Stop
+
+    $credential = [PSCredential]::new($username, $passwordSecret.SecretValue)
+
+    $accessRule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $username,
+        [Security.AccessControl.FileSystemRights]::Modify,
+        [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+    $workingDirectoryAcl = Get-Acl -LiteralPath $workingDirectory
+    $workingDirectoryAcl.SetAccessRule($accessRule)
+    Set-Acl -LiteralPath $workingDirectory -AclObject $workingDirectoryAcl -ErrorAction Stop
+
+    $arguments = @(
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', ('"{0}"' -f $joinScriptPath),
+        '-SubscriptionId', ('"{0}"' -f $SubscriptionId),
+        '-StorageAccountResourceGroupName', ('"{0}"' -f $StorageAccountResourceGroupName),
+        '-StorageAccountName', ('"{0}"' -f $StorageAccountName),
+        '-SamAccountName', ('"{0}"' -f $SamAccountName),
+        '-DomainFqdn', ('"{0}"' -f $DomainFqdn),
+        '-DomainAccountType', ('"{0}"' -f $DomainAccountType)
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($OrganizationalUnitDistinguishedName)) {
+        $arguments += @('-OrganizationalUnitDistinguishedName', ('"{0}"' -f $OrganizationalUnitDistinguishedName))
+    }
+
+    $launcher = '@echo off' + [Environment]::NewLine +
+        ('"{0}" {1} 1>"{2}" 2>"{3}"' -f `
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", `
+            ($arguments -join ' '), `
+            $stdoutPath, `
+            $stderrPath)
+    Set-Content -LiteralPath $launcherPath -Value $launcher -Encoding Ascii -ErrorAction Stop
+
+    Write-Output "Starting the isolated join script as scheduled task '$taskName' under AD DS identity '$username'."
+    $taskAction = New-ScheduledTaskAction `
+        -Execute "$env:SystemRoot\System32\cmd.exe" `
+        -Argument ('/d /c "{0}"' -f $launcherPath) `
+        -WorkingDirectory $workingDirectory
+    $taskSettings = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+        -MultipleInstances IgnoreNew
+    $plainTextPassword = $credential.GetNetworkCredential().Password
+    Register-ScheduledTask `
+        -TaskName $taskName `
+        -Action $taskAction `
+        -Settings $taskSettings `
+        -User $username `
+        -Password $plainTextPassword `
+        -RunLevel Highest `
+        -Force `
+        -ErrorAction Stop | Out-Null
+    $plainTextPassword = $null
+
+    $initialTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    $deadline = (Get-Date).AddHours(1)
+    do {
+        Start-Sleep -Seconds 5
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+        $taskHasStarted = $taskInfo.LastRunTime -gt $initialTaskInfo.LastRunTime
+        $taskHasCompleted = $taskHasStarted -and $task.State -notin @('Queued', 'Running')
+    } while (-not $taskHasCompleted -and (Get-Date) -lt $deadline)
+
+    if (-not $taskHasCompleted) {
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        throw "The domain-join scheduled task exceeded its one-hour execution limit."
+    }
+
+    $taskResult = $taskInfo.LastTaskResult
+
+    if (Test-Path -LiteralPath $stdoutPath) {
+        Get-Content -LiteralPath $stdoutPath | Write-Output
+    }
+
+    if ($taskResult -ne 0) {
+        $errorOutput = if (Test-Path -LiteralPath $stderrPath) {
+            Get-Content -LiteralPath $stderrPath -Raw
+        }
+        else {
+            'No stderr content was returned.'
+        }
+        throw "The domain-join scheduled task failed with result $taskResult`: $errorOutput"
+    }
+
+    Write-Output 'The domain-join process completed successfully.'
+}
+finally {
+    $plainTextPassword = $null
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $workingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}

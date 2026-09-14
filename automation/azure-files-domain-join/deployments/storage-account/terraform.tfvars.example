@@ -1,0 +1,31 @@
+subscription_id     = "00000000-0000-0000-0000-000000000000"
+resource_group_name = "rg-azure-files-app001"
+location            = "eastus"
+
+automation_account_resource_group_name = "rg-azure-files-domain-platform"
+automation_account_name                = "aa-azure-files-domain"
+runbook_name                           = "Join-AzureFilesToDomain"
+hybrid_worker_group_name               = "hrwg-azure-files-domain"
+worker_vm_resource_group_name          = "rg-domain-tools"
+worker_vm_name                         = "vm-domain-tools-01"
+
+key_vault_name                  = "kv-domain-lab"
+domain_username_secret_name     = "azure-files-join-username"
+domain_password_secret_name     = "azure-files-join-password"
+domain_fqdn                     = "contoso.com"
+organizational_unit_distinguished_name = "OU=AzureFiles,DC=contoso,DC=com"
+domain_account_type             = "ComputerAccount"
+sam_account_name                = "stfilesapp001"
+
+storage_account_name                  = "stfilesapp001"
+storage_account_replication_type      = "LRS"
+storage_public_network_access_enabled = true
+file_share_name                       = "appshare"
+file_share_quota_gb                   = 100
+
+tags = {
+  workload  = "app001-files"
+  managedBy = "terraform"
+}
+
+invocation_token = "run-001"

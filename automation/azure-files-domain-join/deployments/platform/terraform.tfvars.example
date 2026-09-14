@@ -1,0 +1,20 @@
+subscription_id     = "00000000-0000-0000-0000-000000000000"
+resource_group_name = "rg-azure-files-domain-platform"
+location            = "eastus"
+
+automation_account_name  = "aa-azure-files-domain"
+runbook_name             = "Join-AzureFilesToDomain"
+hybrid_worker_group_name = "hrwg-azure-files-domain"
+
+worker_vm_resource_group_name = "rg-domain-tools"
+worker_vm_name                = "vm-domain-tools-01"
+
+key_vault_resource_group_name = "rg-security"
+key_vault_name                = "kv-domain-lab"
+domain_username_secret_name   = "azure-files-join-username"
+domain_password_secret_name   = "azure-files-join-password"
+
+tags = {
+  workload  = "azure-files-domain-join-platform"
+  managedBy = "terraform"
+}
