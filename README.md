@@ -4,8 +4,8 @@ Collection of projects and examples related to Azure.
 
 ## Guides
 
-- [Windows VM series migration runbook](guides/MIGRATION-RUNBOOK.md): migrate between sizes with and without local temporary storage using complete snapshot-derived disk sets, retained-source failback, private-IP preservation and graphical administration.
-- [Quick cutover guide](guides/CUTOVER-QUICK-GUIDE.md): abbreviated checklist, including Premium SSD v2 and SQL Server considerations.
+- [Windows VM series migration runbook](guides/azure-vm-no-temp-disk-migration/MIGRATION-RUNBOOK.md): migrate between sizes with and without local temporary storage using complete snapshot-derived disk sets, retained-source failback, private-IP preservation and graphical administration.
+- [Quick cutover guide](guides/azure-vm-no-temp-disk-migration/README.md): abbreviated checklist, including Premium SSD v2 and SQL Server considerations.
 
 ## Automation
 

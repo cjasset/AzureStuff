@@ -2,7 +2,7 @@
 
 **Method:** Retain the deallocated source VM and all its original disks. Snapshot the OS disk and every persistent data disk, create a complete new disk set from those snapshots, and build a separate target from those copies. Azure portal for infrastructure; SSMS and Windows graphical tools for guest administration. No customer scripts, command-line tools or deployment templates.
 
-For an abbreviated checklist, see the [quick cutover guide](./CUTOVER-QUICK-GUIDE.md).
+For an abbreviated checklist, see the [quick cutover guide](./README.md).
 
 ## Important notice
 

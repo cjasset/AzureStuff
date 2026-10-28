@@ -1,4 +1,4 @@
-# Quick guide: Windows VM migration with or without a local temporary disk
+# Azure VM migration: quick guide for sizes with or without a local temporary disk
 
 **Keep the original VM. Migrate copies, not its attached disks.**
 
