@@ -1,6 +1,18 @@
 # Runbook: migrate Windows VMs between series with and without a local temporary disk
 
-**Method:** Retain the deallocated source VM and all its original disks. Snapshot the OS disk and every persistent data disk, create a complete new disk set from those snapshots, and build a separate target from those copies. Azure portal for infrastructure; SSMS and Windows graphical tools for guest administration. No customer scripts, command-line tools or deployment templates.
+## Problem statement
+
+Azure does not support a direct in-place resize of a Windows VM between a size without a local temporary disk and a size with one, in either direction. For example, an Easv5 VM has no local temporary disk and cannot be directly resized to an Ebdsv5 VM, which has one. Moving the workload to a separate VM provides a migration path when an in-place resize is unavailable.
+
+This Windows restriction does not apply universally to Linux: Azure supports Linux resizing between disk and diskless sizes subject to the applicable requirements. Local temporary storage is also distinct from an ephemeral OS disk, which is outside this managed-OS-disk procedure.
+
+## Summary
+
+This guide describes a VM-to-VM migration using snapshots of the OS disk and all persistent data disks. A separate target VM runs on disks created from those snapshots, while the original VM, disks and NIC are preserved for failback through acceptance and the agreed retention period.
+
+The procedure covers a planned write freeze, preservation of drive mappings, transfer of the service private IP, workload validation and SQL Server tuning for the target size. Infrastructure changes use the Azure portal; guest administration uses SSMS and Windows graphical tools. Failback options differ depending on whether the target has accepted new writes.
+
+The example migration is from `Standard_E16as_v5` (16 vCPUs, 128 GiB RAM, no local temporary disk) to `Standard_E8bds_v5` (8 vCPUs, 64 GiB RAM, 300-GiB local temporary disk, up to 16 data disks). Other sizes have different limits. A change in temporary-disk availability does not require reducing CPU or memory.
 
 For an abbreviated checklist, see the [quick cutover guide](./README.md).
 
@@ -10,17 +22,7 @@ This document is provided **as is, without warranty of any kind**, including any
 
 The customer is responsible for validating applicability, authorizing changes, protecting backups and encryption keys, and approving downtime and recovery. Stop and engage the appropriate Azure/SQL support team if a required setting or portal action is unavailable or differs from this guide. Do not substitute an unreviewed workaround.
 
-Portal controls vary by VM, storage configuration and software version. Rehearse the complete graphical procedure, private-IP transfer and both failback boundaries on a representative non-production copy before approval. Do not promise a downtime duration.
-
-## Problem statement
-
-For **Windows VMs**, Azure does not support a **direct in-place resize** between a size without a local temporary disk and a size with one, in either direction. For example, an **Easv5** VM without local temporary storage cannot be directly resized to an **Ebdsv5** VM with local temporary storage. This is a resize restriction, not a prohibition on migrating the workload.
-
-The workaround in this guide is to retain the deallocated source, snapshot its OS disk and **all persistent data disks**, create a complete new disk set, and deploy a separate compatible target VM. Transfer the private service IP under a write freeze, validate the workload, and retain the source until final acceptance.
-
-**Example only:** `Standard_E16as_v5` (16 vCPUs, 128 GiB RAM, no local temporary disk) to `Standard_E8bds_v5` (8 vCPUs, 64 GiB RAM, 300-GiB local temporary disk, up to 16 data disks). Other sizes have different limits. A change in temporary-disk availability does not require reducing CPU or memory.
-
-This Windows restriction does not apply universally to Linux: Azure supports Linux resizing between disk and diskless sizes subject to the applicable requirements. Local temporary storage is also distinct from an **ephemeral OS disk**, which is outside this managed-OS-disk procedure.
+Portal controls vary by VM, storage configuration and software version. Rehearse the complete graphical procedure, private-IP transfer and both failback boundaries on a representative non-production copy before approval. Downtime depends on the environment and the time required to complete and validate the migration.
 
 ## 1. Scope, constraints and expected outcome
 
@@ -31,7 +33,7 @@ This Windows restriction does not apply universally to Linux: Azure supports Lin
 5. The Azure portal creates a **new NIC** when creating a VM. It does not offer reuse of an existing NIC in that creation workflow. This guide transfers the original private IPv4 address to the new NIC and manually reapplies NIC-specific configuration. The original NIC is retained on a different, approved address.
 6. There is a planned outage. The original IP is briefly unassigned during the controlled transfer. Freeze competing subnet allocations and coordinate with the network/IPAM owner; Azure does not atomically transfer the address between NICs.
 7. Intended RPO is zero for committed transactions at the approved write freeze, conditional on preserving current disks, verified recovery and successful validation. There is **no unconditional no-data-loss guarantee**. In-flight/uncommitted transactions may roll back normally.
-8. **Keep the original source VM, original NIC and every original disk until final acceptance and the agreed retention period end.** Keep it deallocated while the target runs. Before new target commits, failback can return the service IP and start that VM. After new commits, its old disks are stale: use Section 13's current-state failback.
+8. The original source VM, NIC and disks remain in place through final acceptance and the agreed retention period. The source stays deallocated while the target runs. Before new target commits, failback can return the service IP and start that VM. After new commits, its old disks are stale: use Section 13's current-state failback.
 9. Preserve actual customer drive letters and mount points. The following letters are examples, not directions to reletter production:
 
    | Purpose | Source | Target |

@@ -1,18 +1,22 @@
 # Azure VM migration: quick guide for sizes with or without a local temporary disk
 
-**Keep the original VM. Migrate copies, not its attached disks.**
-
-**Tools:** Azure portal; SSMS and Windows graphical tools over approved private access. No customer scripts, command-line tools or deployment templates.
-
-**Provided as is, without warranty of any kind.** No guarantee of zero loss or a downtime duration. Obtain customer approval, prove independent backup recovery, and rehearse the [full runbook](./MIGRATION-RUNBOOK.md) using the customer's actual portal/software versions.
-
 ## Problem statement
 
-Azure does not support a **direct in-place resize of a Windows VM** between a size without a local temporary disk and a size with one, in either direction. For example, **Easv5** (no local temporary disk) cannot be directly resized to **Ebdsv5** (with local temporary disk). Migrate the workload using a separate VM and snapshot-derived persistent disks instead.
+Azure does not support a direct in-place resize of a Windows VM between a size without a local temporary disk and a size with one, in either direction. For example, an Easv5 VM has no local temporary disk and cannot be directly resized to an Ebdsv5 VM, which has one.
 
-**Example only:** `Standard_E16as_v5` (16 vCPUs / 128 GiB, no local temporary disk) to `Standard_E8bds_v5` (8 vCPUs / 64 GiB, 300-GiB local temporary disk, up to 16 data disks). Use the actual limits of the selected sizes; CPU/memory need not decrease.
+## Summary
+
+This guide describes a VM-to-VM migration using snapshots of the OS disk and all persistent data disks. The target runs on a separate set of disks, while the original VM, disks and NIC are preserved for failback through acceptance and the agreed retention period. The procedure includes preserving drive mappings and the service private IP, validating the workload, and adjusting SQL Server settings for the target size.
+
+The steps use the Azure portal, SSMS and Windows graphical tools. The [full runbook](./MIGRATION-RUNBOOK.md) provides the detailed procedure and recovery options.
+
+The example migration is from `Standard_E16as_v5` (16 vCPUs / 128 GiB, no local temporary disk) to `Standard_E8bds_v5` (8 vCPUs / 64 GiB, 300-GiB local temporary disk, up to 16 data disks). Other sizes have different limits; changing temporary-disk availability does not require reducing CPU or memory.
 
 **Scope:** standalone Windows VM, persistent managed OS/data disks, same region/subnet, SCSI. SQL Server steps apply only if installed; otherwise use application-owner-approved equivalent backup, quiescing and validation. Not an FCI/AG, multi-NIC, Storage Spaces/dynamic-disk, ephemeral OS disk or specialized encryption/placement procedure. Linux has different resize support; do not apply this Windows restriction universally.
+
+## Important notice
+
+This guide is provided as is, without warranty of any kind. Data protection and downtime depend on the environment, recoverable backups and successful validation. Change approval, an independent recovery test and rehearsal of the full procedure are prerequisites.
 
 ## Before the outage
 
@@ -20,7 +24,7 @@ Azure does not support a **direct in-place resize of a Windows VM** between a si
 2. **Inventory off VM:** source OS/every data disk, LUN/cache, letters/mounts, SQL/tempdb paths, NIC/IP/security/DNS, identities, management/backups and SQL tuning. Preserve source-compatible persistent tempdb paths for failback.
 3. **Premium SSD v2:** data disks only; **None** host caching. Preserve sector size, capacity, IOPS/throughput, encryption and compatible zone. Use incremental snapshots. A 4-KiB-sector snapshot needs a compatible v2/Ultra restore, not conventional Premium SSD.
 4. **Prove recovery and remove disappearing-disk dependencies:** take independently protected backups and prove isolated restore/integrity (SSMS for SQL). When moving **from local-disk to diskless**, first move the pagefile, all tempdb data/log files and scratch/startup dependencies to approved persistent storage through supported graphical tools, then reboot/validate source before snapshots. Temporary-disk contents are not captured. Define acceptance, failback boundary and retention.
-5. **Prepare network/retention:** original service IP Static in Azure; Windows DHCP enabled. Reserve target provisional and source parking IPs. Portal creates a new target NIC; inventory settings to reproduce. Retain **source VM, SQL registration, original disks and NIC until the very end**.
+5. **Prepare network/retention:** original service IP Static in Azure; Windows DHCP enabled. Reserve target provisional and source parking IPs. Portal creates a new target NIC; inventory settings to reproduce. Include the source VM, SQL registration, original disks and NIC in the retention plan through acceptance and the agreed recovery period.
 
 ## Cutover: keep writers gated
 
