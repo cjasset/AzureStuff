@@ -4,6 +4,7 @@ Collection of projects and examples related to Azure.
 
 ## Policies
 
+- [Require explicit routing models for model router deployments](Policies/Model-Router-Required-Models/README.md): require a non-empty model subset as an explicit-configuration guardrail alongside built-in approved-model governance.
 - [Audit mandatory tags on resource groups](Policies/Mandatory-Tags/README.md): coarse-grained verification that required tags are present and have non-empty values, without validating business-specific values.
 - [Audit or deny retired and retiring VM sizes](Policies/Retired-VM-SKUs/README.md): retirement guardrails for virtual machines and scale sets, with Audit/Deny effects, a maintained baseline, and an additive VM size picker.
 

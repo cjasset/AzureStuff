@@ -1,0 +1,48 @@
+{
+    "displayName": "Model router deployments must specify routing models",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Audits or denies Microsoft Foundry model router deployments when the routing models collection is missing, null, or empty.",
+    "metadata": {
+      "category": "Cognitive Services",
+      "version": "1.0.0"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Audit or deny noncompliant model router deployments. Disabled turns off evaluation."
+        },
+        "allowedValues": [
+          "Audit",
+          "Deny",
+          "Disabled"
+        ],
+        "defaultValue": "Deny"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.CognitiveServices/accounts/deployments"
+          },
+          {
+            "field": "Microsoft.CognitiveServices/accounts/deployments/model.name",
+            "equals": "model-router"
+          },
+          {
+            "count": {
+              "field": "Microsoft.CognitiveServices/accounts/deployments/routing.models[*]"
+            },
+            "equals": 0
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+  }
+}
