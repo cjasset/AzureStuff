@@ -2,6 +2,10 @@
 
 Collection of projects and examples related to Azure.
 
+## Policies
+
+- [Audit or deny retired and retiring VM sizes](Policies/Retired-VM-SKUs/README.md): retirement guardrails for virtual machines and scale sets, with Audit/Deny effects, a maintained baseline, and an additive VM size picker.
+
 ## Guides
 
 - [Windows VM series migration runbook](guides/azure-vm-no-temp-disk-migration/MIGRATION-RUNBOOK.md): migrate between sizes with and without local temporary storage using complete snapshot-derived disk sets, retained-source failback, private-IP preservation and graphical administration.

@@ -1,0 +1,204 @@
+{
+  "displayName": "Virtual machines and scale sets must not use retired or retiring size SKUs",
+  "policyType": "Custom",
+  "mode": "All",
+  "description": "Audits or denies VM and VM scale set sizes in the retired and announced-retirement series listed by Microsoft Learn. Includes future retirements immediately, not only after their retirement dates. This is a manually maintained public Azure snapshot; it does not query the live retirement list.",
+  "metadata": {
+    "category": "Compute",
+    "version": "1.1.0",
+    "source": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/retirements-and-capacity-restrictions",
+    "sourceReviewedOn": "2026-10-28"
+  },
+  "parameters": {
+    "effect": {
+      "type": "String",
+      "metadata": {
+        "displayName": "Effect",
+        "description": "Audit reports noncompliance. Deny blocks matching creates and updates. Disabled turns off evaluation."
+      },
+      "allowedValues": ["Audit", "Deny", "Disabled"],
+      "defaultValue": "Audit"
+    },
+    "disallowedSkuPatterns": {
+      "type": "Array",
+      "metadata": {
+        "displayName": "Retired and retiring VM size patterns",
+        "description": "Case-insensitive Azure Policy match patterns, NOT glob or regex: # matches one digit, ? one letter, and . one character. All other characters are literal. Keep the array at 100 entries or fewer (the value-count iteration limit). Replacing this parameter replaces the entire default list."
+      },
+      "defaultValue": [
+        "Standard_D#",
+        "Standard_D##",
+        "Standard_DS#",
+        "Standard_DS##",
+        "Standard_D#_v2",
+        "Standard_D##_v2",
+        "Standard_DS#_v2",
+        "Standard_DS##_v2",
+        "Standard_DS##-#_v2",
+        "Standard_DS##-##_v2",
+        "Standard_A#_v2",
+        "Standard_A##_v2",
+        "Standard_A#m_v2",
+        "Standard_A##m_v2",
+        "Standard_B#s",
+        "Standard_B##s",
+        "Standard_B#ms",
+        "Standard_B##ms",
+        "Standard_B#ls",
+        "Standard_D#_v3",
+        "Standard_D##_v3",
+        "Standard_D#s_v3",
+        "Standard_D##s_v3",
+        "Standard_D#-#s_v3",
+        "Standard_D##-#s_v3",
+        "Standard_D##-##s_v3",
+        "Standard_DC#s_v2",
+        "Standard_DC##s_v2",
+        "Standard_DC8_v2",
+        "Standard_DC#as_cc_v5",
+        "Standard_DC##as_cc_v5",
+        "Standard_DC#ads_cc_v5",
+        "Standard_DC##ads_cc_v5",
+        "Standard_DC#s_v3",
+        "Standard_DC##s_v3",
+        "Standard_DC#ds_v3",
+        "Standard_DC##ds_v3",
+        "Standard_F#",
+        "Standard_F##",
+        "Standard_F#s",
+        "Standard_F##s",
+        "Standard_F#s_v2",
+        "Standard_F##s_v2",
+        "Standard_G#",
+        "Standard_GS#",
+        "Standard_GS#-#",
+        "Standard_GS#-##",
+        "Standard_E#_v3",
+        "Standard_E##_v3",
+        "Standard_E#s_v3",
+        "Standard_E##s_v3",
+        "Standard_E#-#s_v3",
+        "Standard_E##-#s_v3",
+        "Standard_E##-##s_v3",
+        "Standard_E64i_v3",
+        "Standard_E64is_v3",
+        "Standard_M192idms_v2",
+        "Standard_M192ids_v2",
+        "Standard_M192ims_v2",
+        "Standard_M192is_v2",
+        "Standard_EC#as_cc_v5",
+        "Standard_EC##as_cc_v5",
+        "Standard_EC#ads_cc_v5",
+        "Standard_EC##ads_cc_v5",
+        "Standard_L#s",
+        "Standard_L##s",
+        "Standard_L#s_v2",
+        "Standard_L##s_v2",
+        "Standard_NC#s_v3",
+        "Standard_NC##s_v3",
+        "Standard_NC##rs_v3",
+        "Standard_NV#s_v3",
+        "Standard_NV##s_v3",
+        "Standard_NV#as_v4",
+        "Standard_NV##as_v4",
+        "Standard_NP10s",
+        "Standard_NP20s",
+        "Standard_NP40s",
+        "Standard_HC44rs",
+        "Standard_HB120rs_v2",
+        "Standard_HB120-16rs_v2",
+        "Standard_HB120-32rs_v2",
+        "Standard_HB120-64rs_v2",
+        "Standard_HB120-96rs_v2"
+      ]
+    },
+    "additionalDisallowedVmSkus": {
+      "type": "Array",
+      "metadata": {
+        "displayName": "Additional disallowed VM sizes (beyond the retirement baseline)",
+        "description": "Optional exact VM sizes to audit or deny IN ADDITION TO the retirement patterns. Retired SKUs may no longer appear in the picker; do not use it to reconstruct or replace the baseline. Maintain missing retired SKUs through the baseline patterns or exact values in JSON/IaC. This picker does not detect retirements automatically.",
+        "strongType": "VMSKUs"
+      },
+      "defaultValue": []
+    }
+  },
+  "policyRule": {
+    "if": {
+      "allOf": [
+        {
+          "field": "type",
+          "in": [
+            "Microsoft.Compute/virtualMachines",
+            "Microsoft.Compute/virtualMachineScaleSets"
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "count": {
+                "value": "[parameters('disallowedSkuPatterns')]",
+                "name": "retiredSkuPattern",
+                "where": {
+                  "anyOf": [
+                    {
+                      "allOf": [
+                        {
+                          "field": "type",
+                          "equals": "Microsoft.Compute/virtualMachines"
+                        },
+                        {
+                          "field": "Microsoft.Compute/virtualMachines/hardwareProfile.vmSize",
+                          "matchInsensitively": "[current('retiredSkuPattern')]"
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "field": "type",
+                          "equals": "Microsoft.Compute/virtualMachineScaleSets"
+                        },
+                        {
+                          "field": "sku.name",
+                          "matchInsensitively": "[current('retiredSkuPattern')]"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "greater": 0
+            },
+            {
+              "allOf": [
+                {
+                  "field": "type",
+                  "equals": "Microsoft.Compute/virtualMachines"
+                },
+                {
+                  "field": "Microsoft.Compute/virtualMachines/hardwareProfile.vmSize",
+                  "in": "[parameters('additionalDisallowedVmSkus')]"
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "field": "type",
+                  "equals": "Microsoft.Compute/virtualMachineScaleSets"
+                },
+                {
+                  "field": "sku.name",
+                  "in": "[parameters('additionalDisallowedVmSkus')]"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "then": {
+      "effect": "[parameters('effect')]"
+    }
+  }
+}
