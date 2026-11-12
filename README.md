@@ -10,7 +10,34 @@ recommends a target size for each, scores migration readiness against the fleet'
 Modelled on the Azure Advisor *Service Retirement* workbook, but VM-specific and
 with target mapping plus readiness scoring that Advisor does not provide.
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fkrishna-sunkavalli%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
+
+## Fork policy: v5 first
+
+This fork of [the upstream workbook](https://github.com/krishna-sunkavalli/vm-retirement-workbook)
+prefers a **catalogued, non-NVMe v5 target** for retirement remediation, rather than
+defaulting directly to v6. Candidates must preserve CPU architecture, vCPU and
+memory capacity, local-disk presence/known capacity and premium-storage support. Only existing
+target records are eligible; SKU names are not invented by replacing a suffix.
+
+The target specifications, memory-preserving target, regional lookup and readiness
+warnings are derived from the selected target together. For example, DS1_v2 and
+D2s_v3 now recommend **D2ds_v5**, which retains local storage and supports Gen1/Gen2.
+They no longer inherit the Gen2-only/NVMe penalties of the original D2ads_v6 target.
+V6 remains an explicit alternative, requiring its own boot-controller validation.
+
+If no suitable v5 candidate exists in the captured catalogue, the newer target
+remains visible with **manual review required**. Existing non-NVMe recommendations
+such as modern B-series are retained. Optional modernization is separate and may
+still suggest a newer generation for a VM that is not retiring.
+
+**V5 is not a compatibility guarantee.** MANA/accelerated networking is evaluated
+independently of NVMe and may apply to v5 SCSI hardware. Guest OS, ADE/encryption,
+drivers, disk/NIC limits, storage performance, application behavior, quota,
+subscription restrictions and availability still need independent validation.
+The source catalogue is a historical subscription snapshot, not live eligibility.
+The original screenshots and score examples below describe the upstream baseline,
+not the regenerated v5-first recommendations.
 
 ![Overview tab](docs/images/overview.png)
 
@@ -82,7 +109,8 @@ and **35** on Gen1 VMs.
 | Memory reduction at same vCPU | 25 | Source vs target memory |
 | Local temp disk removed | 20 | Source has temp disk, target does not |
 | Unconfirmed VM generation | 20 | OS disk metadata unreadable |
-| NVMe and MANA validation | 15 | Target requires NVMe controller |
+| NVMe boot validation | 15 | Selected target requires NVMe controller |
+| MANA/accelerated networking validation | 0 | Hardware-dependent, independent of storage controller |
 | Narrow target region footprint | 10 | Target region count |
 | Availability zone parity | 10 | Only when the VM uses a zone |
 | vCPU count change | 5 | No target at the current vCPU count |
@@ -206,7 +234,7 @@ artifact you can share, the Excel export per grid is the reliable path.
 
 ### Option A - Deploy to Azure (recommended)
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fkrishna-sunkavalli%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
 
 Pick a subscription and resource group, then **Review + create**. The workbook
 appears under **Monitor → Workbooks**.

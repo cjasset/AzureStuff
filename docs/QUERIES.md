@@ -143,7 +143,9 @@ resources
         iff(PenArch > 0, 'Arm64 port, ', ''),
         iff(PenMem > 0, 'Memory downgrade, ', ''),
         iff(PenTemp > 0, 'Temp disk dependency, ', ''),
-        iff(PenNvme > 0, 'NVMe and MANA validation, ', ''),
+        iff(PenNvme > 0, 'NVMe boot validation, ', ''),
+        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),
+        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),
         iff(PenRegion > 0, 'Target not in region, ', ''),
         iff(PenVcpu > 0, 'vCPU count change, ', '')))
 | extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)
@@ -154,7 +156,9 @@ resources
         iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),
         iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),
         iff(WarnCodes has 't', 'Local temp disk removed, ', ''),
-        iff(WarnCodes has 'n', 'Target requires NVMe and MANA, ', ''),
+        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),
+        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),
+        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),
         iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),
         iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),
         iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))

@@ -87,6 +87,8 @@ WARN_SHORT = {
     "temp_disk_removed": "t",
     "no_three_az_regions": "z",
     "cpu_architecture_change": "a",
+    "v5_target_review": "u",
+    "mana_validation": "h",
 }
 SHORT_WARN = {v: k for k, v in WARN_SHORT.items()}
 
@@ -111,17 +113,33 @@ PREREQ = {
         "title": "Generation 1 to Generation 2 (BIOS to UEFI) conversion",
         "sev": "Blocking",
         "what": "Convert the OS disk from Generation 1 to Generation 2, or rebuild the VM from a Gen2 image. Confirm the OS version is supported for Gen2 and that any custom or Marketplace image has a Gen2 variant.",
-        "why": "Most v6 target sizes are Generation 2 only. A Gen1 VM cannot be resized into them. This is a prerequisite, not a step in the resize, and it is the most commonly underestimated item.",
+        "why": "The selected target supports Generation 2 only. A Gen1 VM cannot be resized into it without conversion or rebuilding. A compatible v5 target can avoid this requirement.",
         "how": "Windows: MBR2GPT. Linux: distro-specific. Or redeploy from a Gen2 image.",
         "doc": "https://learn.microsoft.com/azure/virtual-machines/generation-2",
     },
     "nvme_required": {
-        "title": "NVMe disk controller and MANA networking support",
+        "title": "NVMe disk controller support",
         "sev": "Validate",
-        "what": "Confirm the OS image includes the NVMe driver and supports MANA (Microsoft Azure Network Adapter). Test boot on the target size before bulk migration.",
-        "why": "v6 and v7 sizes use an NVMe disk controller and MANA networking. An image without the driver will not boot after resize, or will lose accelerated networking. Hardened, custom and older golden images are the usual failures.",
+        "what": "Confirm the OS image supports the selected target's NVMe boot controller. Test boot on the target size before bulk migration. MANA networking is evaluated separately.",
+        "why": "A target requiring NVMe can fail to boot an incompatible image. Driver presence alone is not boot proof; custom and older images need a target-specific rehearsal.",
         "how": "Check the supported OS list, then validate one VM per image lineage.",
         "doc": "https://learn.microsoft.com/azure/virtual-machines/nvme-overview",
+    },
+    "mana_validation": {
+        "title": "MANA and accelerated networking validation",
+        "sev": "Validate",
+        "what": "Check the actual target hardware, guest driver and accelerated networking traffic independently from the storage controller. This can apply to v5 SCSI targets too.",
+        "why": "MANA exposure depends on host hardware. Missing hardware is unknown driver readiness, not proof of failure; virtual-switch fallback may preserve connectivity with different performance.",
+        "how": "Validate hardware, adapter, driver and traffic for each image lineage on the selected target.",
+        "doc": "https://learn.microsoft.com/azure/virtual-network/accelerated-networking-mana-overview",
+    },
+    "v5_target_review": {
+        "title": "No suitable v5 target in the captured catalogue",
+        "sev": "Plan",
+        "what": "Review the newer-generation recommendation manually. No catalogued v5 candidate preserves the required architecture, CPU, memory, local-disk and premium-storage capabilities without requiring NVMe.",
+        "why": "V5-first is a preference, not permission to invent a SKU or downgrade workload requirements.",
+        "how": "Refresh the target catalogue and confirm a supported migration path before choosing a newer target.",
+        "doc": "https://learn.microsoft.com/azure/virtual-machines/sizes/overview",
     },
     "temp_disk_removed": {
         "title": "Local temp disk dependency removal",
@@ -229,6 +247,61 @@ def num(v):
         return str(v)
 
 
+def select_targets(record, impacted):
+    """Prefer a catalogued non-NVMe v5 target without weakening source capacity."""
+    targets = record.get("targets") or []
+    preferred = next((t for t in targets
+                      if t.get("sku") == record.get("recommended_target")), None)
+    preferred = preferred or (targets[0] if targets else {})
+    memory_target = record.get("memory_preserving_target") or {}
+    codes = {w["code"] for w in record.get("warnings") or []}
+    current = record.get("current") or {}
+
+    if impacted and (preferred.get("nvme_required") or
+                     preferred.get("sku", "").endswith(("_v6", "_v7"))):
+        candidates = [
+            t for t in targets
+            if t.get("sku", "").endswith("_v5")
+            and t.get("nvme_required") is False
+            and t.get("cpu_arch") == current.get("cpu_arch")
+            and current.get("cpu_arch") is not None
+            and t.get("hyperv_generations")
+            and t.get("vcpu") is not None and current.get("vcpu") is not None
+            and t.get("vcpu") >= current["vcpu"]
+            and t.get("memory_gb") is not None and current.get("memory_gb") is not None
+            and t.get("memory_gb") >= current["memory_gb"]
+            and (current.get("has_temp_disk") is False or t.get("has_temp_disk") is True)
+            and (current.get("temp_disk_gb") is None or
+                 (t.get("temp_disk_gb") is not None
+                  and t["temp_disk_gb"] >= current["temp_disk_gb"]))
+            and (current.get("premium_io") is False or t.get("premium_io") is True)
+        ]
+        if candidates:
+            preferred = min(candidates, key=lambda t: (
+                t["vcpu"] - current["vcpu"], t["memory_gb"] - current["memory_gb"]))
+            memory_target = preferred
+            codes -= {
+                "gen1_not_supported", "nvme_required", "cpu_architecture_change",
+                "memory_downgrade", "temp_disk_removed", "no_exact_vcpu_match",
+                "narrow_regional_availability", "no_three_az_regions",
+            }
+            if "V1" not in preferred["hyperv_generations"].split(","):
+                codes.add("gen1_not_supported")
+            if preferred["vcpu"] != current["vcpu"]:
+                codes.add("no_exact_vcpu_match")
+            if preferred.get("deployable_region_count", 0) < 10:
+                codes.add("narrow_regional_availability")
+            if preferred.get("az3_region_count", 0) == 0:
+                codes.add("no_three_az_regions")
+        else:
+            codes.add("v5_target_review")
+
+    if (preferred.get("sku", "").endswith(("_v5", "_v6", "_v7"))
+            and preferred.get("accelerated_networking") is True):
+        codes.add("mana_validation")
+    return preferred, memory_target, codes
+
+
 def build_lookups(data):
     skus = data["skus"]
     sku_map = {}
@@ -266,20 +339,12 @@ def build_lookups(data):
         price = "1" if (r.get("series") or "") in PRICE_SERIES else "0"
 
         cur = r.get("current") or {}
-        mp = r.get("memory_preserving_target") or {}
         targets = r.get("targets") or []
-        preferred = next((t for t in targets
-                          if t.get("sku") == r.get("recommended_target")), None)
-        if preferred is None and targets:
-            preferred = targets[0]
-        preferred = preferred or {}
-
-        codes = sorted({WARN_SHORT.get(w["code"], "")
-                        for w in (r.get("warnings") or [])} - {""})
-        alts = [t["sku"] for t in targets
-                if t.get("sku") != r.get("recommended_target")][:3]
-
         impacted = tier in ("RETIRE", "EOL")
+        preferred, mp, warning_codes = select_targets(r, impacted)
+        codes = sorted({WARN_SHORT.get(code, "") for code in warning_codes} - {""})
+        alts = list(dict.fromkeys(t["sku"] for t in targets
+                                 if t.get("sku") != preferred.get("sku")))[:3]
 
         # OPTIONAL sizes carry a slim record: they have no retirement date, so the
         # extra fields would only inflate every embedded query.
@@ -287,7 +352,7 @@ def build_lookups(data):
             tier,                                             # 0
             group,                                            # 1
             retire,                                           # 2
-            r.get("recommended_target") or "",                # 3
+            preferred.get("sku") or "",                       # 3
             mp.get("sku") or "" if impacted else "",          # 4
             num(preferred.get("vcpu")),                       # 5
             num(preferred.get("memory_gb")),                  # 6
@@ -456,7 +521,9 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         iff(PenArch > 0, 'Arm64 port, ', ''),
         iff(PenMem > 0, 'Memory downgrade, ', ''),
         iff(PenTemp > 0, 'Temp disk dependency, ', ''),
-        iff(PenNvme > 0, 'NVMe and MANA validation, ', ''),
+        iff(PenNvme > 0, 'NVMe boot validation, ', ''),
+        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),
+        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),
         iff(PenRegion > 0, 'Target not in region, ', ''),
         iff(PenVcpu > 0, 'vCPU count change, ', '')))
 | extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)
@@ -467,7 +534,9 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),
         iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),
         iff(WarnCodes has 't', 'Local temp disk removed, ', ''),
-        iff(WarnCodes has 'n', 'Target requires NVMe and MANA, ', ''),
+        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),
+        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),
+        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),
         iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),
         iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),
         iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))
@@ -618,6 +687,14 @@ def build(data):
         "subscriptions you select, identifies which sizes are affected by announced "
         "Azure VM retirements and lifecycle changes, recommends a target size for each, "
         "and scores how ready each workload is to move.\n\n"
+        "**Fork policy: v5 first.** Retirement recommendations prefer a catalogued "
+        "non-NVMe v5 target that preserves architecture, CPU, memory, local disk "
+        "(including known capacity) and "
+        "premium-storage support. Newer targets remain alternatives. If no suitable "
+        "v5 candidate exists, the newer target is explicitly marked for manual review. "
+        "Optional modernization is separate from retirement remediation.\n\n"
+        "V5 does not eliminate MANA, guest OS, encryption, quota or application checks. "
+        "A high score is not a migration certification.\n\n"
         "Readiness is calculated from your **actual** fleet attributes - the real Hyper-V "
         "generation of each OS disk, the region and zone each VM runs in, and whether it "
         "sits in an availability set or scale set - not from size metadata alone.\n\n"
@@ -1231,7 +1308,8 @@ def build(data):
         "| Memory reduction at same vCPU | 25 | Source vs target memory |\n"
         "| Local temp disk removed | 20 | Source has temp disk, target does not |\n"
         "| Unconfirmed VM generation | 20 | OS disk metadata unavailable |\n"
-        "| NVMe and MANA validation | 15 | Target requires NVMe controller |\n"
+        "| NVMe boot validation | 15 | Selected target requires NVMe controller |\n"
+        "| MANA/accelerated networking validation | 0 | Hardware-dependent, independent of storage controller |\n"
         "| Narrow target region footprint | 10 | Target region count |\n"
         "| Availability zone parity | 10 | Only when the VM uses a zone |\n"
         "| vCPU count change | 5 | No size exists at the current vCPU count |\n"
@@ -1337,7 +1415,7 @@ def arm_template(workbook):
         "parameters": {
             "workbookDisplayName": {
                 "type": "string",
-                "defaultValue": "Azure VM Lifecycle & Modernization Readiness",
+                "defaultValue": "Azure VM Lifecycle & Modernization Readiness - v5 first",
                 "metadata": {"description": "Name shown in the Workbooks gallery."},
             },
             "workbookId": {
