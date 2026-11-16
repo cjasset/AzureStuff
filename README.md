@@ -1,4 +1,4 @@
-# Azure VM Lifecycle & Modernization Readiness Workbook
+# Azure VM Retirement & Upgrade Planner
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -277,7 +277,7 @@ az group create --name rg-vm-lifecycle --location eastus
 az deployment group create \
   --resource-group rg-vm-lifecycle \
   --template-file workbook/azuredeploy.json \
-  --parameters workbookDisplayName="Azure VM Lifecycle & Modernization Readiness"
+  --parameters workbookDisplayName="Azure VM Retirement & Upgrade Planner"
 ```
 
 ### Option C - Azure PowerShell
@@ -288,7 +288,7 @@ New-AzResourceGroup -Name "rg-vm-lifecycle" -Location "eastus"
 New-AzResourceGroupDeployment `
   -ResourceGroupName "rg-vm-lifecycle" `
   -TemplateFile "workbook/azuredeploy.json" `
-  -workbookDisplayName "Azure VM Lifecycle & Modernization Readiness"
+  -workbookDisplayName "Azure VM Retirement & Upgrade Planner"
 ```
 
 ### Option D - paste the template (no resource created)

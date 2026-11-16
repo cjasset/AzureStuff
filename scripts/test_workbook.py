@@ -22,6 +22,13 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual(json.loads(resource["properties"]["serializedData"]), self.workbook)
         self.assertEqual(resource["properties"]["version"], self.workbook["version"])
 
+    def test_customer_facing_name_is_consistent(self):
+        title = "Azure VM Retirement & Upgrade Planner"
+        template = builder.arm_template(self.workbook)
+        self.assertEqual(template["parameters"]["workbookDisplayName"]["defaultValue"], title)
+        header = next(item for item in self.workbook["items"] if item["name"] == "header")
+        self.assertTrue(header["content"]["json"].startswith(f"# {title}\n"))
+
     def test_shared_parameters_preserve_complete_lookup(self):
         lookups = builder.lookup_values(self.workbook)
         sku_map, _, _, regions, region_ids = builder.build_lookups(self.data)

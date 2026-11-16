@@ -31,6 +31,7 @@ REFS = _LOCAL_REFS if os.path.exists(
 OUT = os.path.join(ROOT, "out")
 WORKBOOK_DIR = os.path.join(ROOT, "workbook")
 WORKBOOK_SIZE_LIMIT = 1_000_000
+WORKBOOK_TITLE = "Azure VM Retirement & Upgrade Planner"
 BASE_LOOKUP_PARAMETERS = ("LifecycleSkuMap", "TargetRegionMap", "RegionIdMap")
 PATH_LOOKUP_PARAMETERS = {
     generation: (f"V{generation}PathSkuMap", f"V{generation}PathRegionMap",
@@ -833,7 +834,7 @@ def build(data):
 
     # ---------------- header ----------------
     items.append(text_item(
-        "# Azure VM Lifecycle & Modernization Readiness\n\n"
+        f"# {WORKBOOK_TITLE}\n\n"
         "This workbook inventories the virtual machines and scale sets in the "
         "subscriptions you select, identifies which sizes are affected by announced "
         "Azure VM retirements and lifecycle changes, recommends a target size for each, "
@@ -1578,7 +1579,7 @@ def arm_template(workbook):
         "parameters": {
             "workbookDisplayName": {
                 "type": "string",
-                "defaultValue": "Azure VM Lifecycle & Modernization Readiness - v5 first",
+                "defaultValue": WORKBOOK_TITLE,
                 "metadata": {"description": "Name shown in the Workbooks gallery."},
             },
             "workbookId": {
