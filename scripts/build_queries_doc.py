@@ -32,6 +32,12 @@ DESCRIPTIONS = {
     "imp-grid": ("Impacted resources", "Every affected VM and scale set with region, "
                  "actual generation, recommended target, target region availability, "
                  "readiness score and named blockers."),
+    "regional-price-grid": ("Impacted resources", "Independent inventory of VMs and scale sets "
+                            "in seven regions with publicly reported pricing changes; potential exposure "
+                            "and reported exclusions, not a confirmed bill forecast."),
+    "sql-modernization-grid": ("SQL modernization", "Retiring VMs with matching SQL IaaS "
+                               "extension publisher/handler evidence, deduplicated per VM, including "
+                               "Flexible members. Runtime and migration suitability remain unverified."),
     "path-v5-grid": ("Upgrade paths", "Left-hand V5 panel: independent v5 target, "
                      "target-specific prerequisites, OS/encryption/image signals and explicit unknowns."),
     "path-v6-grid": ("Upgrade paths", "Right-hand V6 panel: independent v6 target, "

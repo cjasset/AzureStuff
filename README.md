@@ -51,7 +51,8 @@ Gen1 VMs, one Gen2 VM and one v3 end-of-life VM.</sub>
 | Tab | Contents |
 | --- | --- |
 | **Overview** | Fleet summary tiles (impacted resources, instances, retirement vs end-of-life split, count needing prerequisite work, fleet readiness score, days to next retirement), urgency and actual-VM-generation donuts, complexity breakdown, commercial impact (pricing update and Reserved Instance status), top affected sizes |
-| **Impacted resources** | Every affected VM and scale set with region, actual Hyper-V generation, recommended target, target region availability, readiness score and named blockers. The resource name deep-links to the resource |
+| **Impacted resources** | Two independent sections: retirement/end-of-life candidates with upgrade prerequisites, and potential regional price exposure (including reported exclusions and source/scope caveats) |
+| **SQL modernization** | Retiring/end-of-life VMs with SQL IaaS Agent extension evidence, provisioning/power states and an assessment checklist; extension presence is not proof of SQL runtime or managed-service suitability |
 | **Upgrade paths** | Side-by-side V5 and V6 panels, each with independently selected targets, per-resource prerequisites, observed OS/encryption/image signals, validation gaps and its own checklist |
 | **Target mapping** | Two grids. *Recommended targets*: current spec, recommended target, memory-preserving alternative, retirement date — the size name links to the announcement. *Alternates, series detail and commercial impact*: up to three alternates, size-level considerations, series spec deltas, whether the 1 Feb 2027 pricing update applies, and when Reserved Instance coverage ends |
 | **Prerequisites** | Prerequisites triggered by *this* fleet, ranked Blocking / Validate / Plan, with what to do, why it matters, how to do it and a docs link, plus the count of affected resources and the sizes involved |
@@ -59,6 +60,52 @@ Gen1 VMs, one Gen2 VM and one v3 end-of-life VM.</sub>
 | **About** | Methodology, the full readiness scoring table, caveats and references |
 
 ### Impacted resources
+
+The **VM retirement / end of life** section respects the Lifecycle status filter
+but always excludes optional modernization. The **Potential regional price exposure**
+section is independent of that filter and the retirement catalogue: modern v5/v6
+VMs can be listed without being classified as retiring. A resource can appear in
+both sections. Overview summary counts continue to describe retirement, not the
+union of financial and lifecycle signals.
+
+Regional figures are **publicly reproduced notification information**, not a
+confirmed tenant-specific increase: North Europe 17%, France Central/South 11%,
+West Europe and Norway East/West 9%, Southeast Asia 8%, reportedly effective
+1 February 2027. The [public Microsoft Learn Q&A source](https://learn.microsoft.com/en-us/answers/questions/6025662/is-there-any-official-announcement-for-azure-vm-in)
+is a community post quoting a notification, **not a formal Microsoft announcement**.
+Verify the authoritative Service Health advisory, in-scope meters, contract and
+reservation treatment. The percentages are not an applied per-VM increase or a
+bill forecast.
+
+VMs in those regions are shown with either potential exposure, series/scope unknown,
+or a **reported regional exclusion**. An exclusion is not a universal exemption
+from other changes, particularly the separate legacy-series update. Unknown SKUs
+remain unknown; only the explicitly named Intel v7 series are treated as reported
+v7 exclusions, not every v7 family. Storage meters are not inventoried here.
+
+### SQL modernization
+
+The separate tab identifies retiring/end-of-life **VMs**, not SQL-looking names or
+Marketplace images, joined to VM extension resources by normalized parent VM ID.
+Detection requires publisher `Microsoft.SqlServer.Management` and handler
+`SqlIaaSAgent` (either ARG handler-property representation). Multiple matching
+extensions are aggregated to one VM row with provisioning states preserved.
+Stopped VMs and failed/unknown extension states remain assessment signals.
+
+Flexible scale-set member VMs are evaluated individually for SQL discovery; the
+scale-set model is not counted again. Uniform instances without individual ARG
+VM/extension records are outside this query's coverage. Absence of a matching
+extension is **not proof SQL is absent**; permissions and ARG indexing also affect
+coverage. The tab includes all retiring/end-of-life matches independently of the
+global Lifecycle status selector.
+
+Before recommending a destination, validate SQL instances/version/edition,
+database compatibility, dependencies (jobs, linked servers, SSIS/SSRS), HA/DR,
+storage performance, licensing and downtime. Evaluate Azure SQL Managed Instance,
+Azure SQL Database or supported SQL on modern VMs based on that assessment.
+The workbook does not inspect guest SQL services or certify a migration target.
+
+### Original upstream screenshot
 
 Sorted worst-readiness first, so the workloads that need the most lead time are at
 the top. Note the two Gen1 VMs scoring 35 and 40 against the Gen2 VM at 85 — same
@@ -241,7 +288,7 @@ The first row is the dangerous one: a production VM sequenced into wave 1.
 ## The queries
 
 Every Azure Resource Graph query the workbook runs is documented verbatim in
-[`docs/QUERIES.md`](docs/QUERIES.md) - 17 read-only queries, with the shared base
+[`docs/QUERIES.md`](docs/QUERIES.md) - 19 read-only queries, with the shared base
 pipeline shown once and each per-tab tail alongside it. Nothing is hidden: you
 can audit exactly what executes against your tenant before you deploy.
 
@@ -320,7 +367,7 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # structural checks + run all 17 queries live
+python scripts/validate_queries.py    # structural checks + run all 19 queries live
 ```
 
 `build_workbook.py` writes four files: the workbook and ARM template under
@@ -333,7 +380,7 @@ Without `--offline`, `validate_queries.py` needs `az login` and the
 `resource-graph` CLI extension. It
 verifies that tab links match group visibility conditions, that every query is
 scoped to `{Subscriptions}` and references only declared parameters, and that all
-17 Resource Graph queries execute successfully. Azure Resource Graph throttles
+19 Resource Graph queries execute successfully. Azure Resource Graph throttles
 aggressive callers, so an occasional single-query failure on a back-to-back run is
 a rate limit rather than a regression - re-run to confirm.
 
@@ -364,7 +411,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 17 queries while keeping the saved workbook below
+628-size catalogue and all 19 queries while keeping the saved workbook below
 1 MB. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
 
@@ -409,7 +456,7 @@ a neutral flag naming the size series in scope for the 1 February 2027 pricing
 update; and the Reserved Instance purchase and renewal end date of 1 July 2026
 ([Azure update 560948](https://azure.microsoft.com/updates?id=560948)).
 
-Deliberately excluded: the rate-change percentage. The increase is scoped by
+For the **legacy-series update**, deliberately excluded: the rate-change percentage. That increase is scoped by
 size series, and the applicable figures depend on your agreement and reach each
 tenant through its own Azure Service Health notification. Restating a single
 percentage in a template that deploys into any tenant would be a generalized
@@ -419,13 +466,19 @@ at the official
 and [Linux](https://azure.microsoft.com/pricing/details/virtual-machines/linux/)
 VM pricing pages for rates.
 
+Separately, the regional exposure section includes the publicly reproduced
+regional percentages, prominently labeled as unverified notification scope rather
+than contractual rates or a bill-impact calculation. They must not be added to
+the legacy-series pricing flag as if the two updates universally stack.
+
 The v3 retirement and the lifecycle policy became public on **28 September 2026**
 via the [Azure blog](https://azure.microsoft.com/blog/enhancing-microsoft-azure-virtual-machine-lifecycle/)
 and the Learn lifecycle pages.
 
 ### Cloud coverage
 
-The retirement and the pricing update do not share the same scope:
+The retirement and the **legacy-series** pricing update do not share the same scope.
+This table does not establish the scope of the separate regional notification:
 
 | | Azure public | 21Vianet | Sovereign / Government |
 | --- | :---: | :---: | :---: |

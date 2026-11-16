@@ -11,7 +11,8 @@ Output:
   out/azure-vm-retirement-workbook.json   (paste into Workbooks Advanced Editor)
   out/deploy-workbook.json                (ARM template, one-click deploy)
 
-SCOPE: public information only. No pricing percentages.
+SCOPE: public information only. Regional percentages are reported exposure signals,
+not contractual rates or a bill forecast.
 """
 
 import json
@@ -68,6 +69,24 @@ PRICE_SERIES = {
     "Av2", "Amv2", "Dv2", "Dsv2", "Fsv2", "Lsv2",
 }
 PRICE_EFFECTIVE = "2027-02-01"
+
+REGIONAL_PRICE_INCREASES = {
+    "northeurope": 17, "francecentral": 11, "francesouth": 11,
+    "westeurope": 9, "norwayeast": 9, "norwaywest": 9, "southeastasia": 8,
+}
+REGIONAL_PRICE_EXCLUDED_SERIES = {
+    "Bsv1", "Bmsv1", "Blsv1", "Dv1", "Dsv1", "Fv1", "Fsv1",
+    "Gv1", "Gsv1", "Lsv1", "NPsv1", "HCS", "Av2", "Amv2", "Dv2",
+    "Dsv2", "Fsv2", "Lsv2", "Dsv7", "Ddsv7", "Dlsv7", "Dldsv7",
+    "Esv7", "Edsv7",
+}
+REGIONAL_PRICE_SOURCE = (
+    "https://learn.microsoft.com/en-us/answers/questions/6025662/"
+    "is-there-any-official-announcement-for-azure-vm-in"
+)
+REGIONAL_PRICE_V7_EXCLUSION_PATTERN = (
+    r"^standard_(d[0-9]+(-[0-9]+)?(s|ds|ls|lds)|e[0-9]+(-[0-9]+)?(s|ds))_v7$"
+)
 
 # Tag keys that commonly carry the environment, in the casings seen in the
 # wild. Checked in order; the first non-empty value wins.
@@ -449,19 +468,9 @@ def expand_lookups(query, workbook):
     return query
 
 
-def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
-               use_lookup_parameters=False, lookup_parameters=BASE_LOOKUP_PARAMETERS):
-    """
-    Core Azure Resource Graph query: fleet inventory joined to the lifecycle
-    lookup, with a readiness score computed from real fleet attributes.
-    """
-    if use_lookup_parameters:
-        m, reg, rids = ("{" + name + "}" for name in lookup_parameters)
-    else:
-        m, reg, rids = (kql_bag(value) for value in (sku_map, tgt_regions, region_ids))
-
-    opt_filter = "" if include_optional else "\n| where Lifecycle != 'OPTIONAL'"
-
+def inventory_query(include_flexible_members=False):
+    member_filter = "" if include_flexible_members else (
+        "\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))")
     return f"""resources
 | where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'
 | extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')
@@ -471,7 +480,7 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
 // set alone represents them. Uniform scale sets do not expose member VMs at
 // all, so they are unaffected. Flexible is the current Azure default, so this
 // matters for most modern fleets.
-| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))
+{member_filter}
 | extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))
 | extend Instances = iff(IsVmss, toint(sku.capacity), 1)
 | extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))
@@ -484,7 +493,19 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
 | extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))
 | extend GuestOsName = tostring(properties.extended.instanceView.osName)
 | project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags
+          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags"""
+
+
+def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
+               use_lookup_parameters=False, lookup_parameters=BASE_LOOKUP_PARAMETERS,
+               include_flexible_members=False):
+    """Fleet inventory joined to lifecycle metadata and target-specific scoring."""
+    if use_lookup_parameters:
+        m, reg, rids = ("{" + name + "}" for name in lookup_parameters)
+    else:
+        m, reg, rids = (kql_bag(value) for value in (sku_map, tgt_regions, region_ids))
+    opt_filter = "" if include_optional else "\n| where Lifecycle != 'OPTIONAL'"
+    return inventory_query(include_flexible_members) + f"""
 | join kind=leftouter (
     resources
     | where type =~ 'microsoft.compute/disks'
@@ -593,6 +614,74 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),
         iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))
 | extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)"""
+
+
+def regional_price_query(data):
+    series_by_sku = {}
+    for record in data["skus"]:
+        for item in [record] + (record.get("targets") or []):
+            if item.get("sku") and item.get("series"):
+                key = item["sku"].lower()
+                if key in series_by_sku and series_by_sku[key] != item["series"]:
+                    raise ValueError(f"Conflicting regional-price series metadata: {key}")
+                series_by_sku[key] = item["series"]
+    regions = kql_bag(REGIONAL_PRICE_INCREASES)
+    series = kql_bag(series_by_sku)
+    exclusions = kql_bag({s.lower(): True for s in REGIONAL_PRICE_EXCLUDED_SERIES})
+    return inventory_query() + f"""
+| extend AnnouncedRegionalPercent = toint(parse_json('{regions}')[tolower(Region)])
+| where isnotnull(AnnouncedRegionalPercent)
+| extend Series = tostring(parse_json('{series}')[tolower(VmSize)])
+| extend ReportedExcluded = tobool(parse_json('{exclusions}')[tolower(Series)]) == true
+        or tolower(VmSize) matches regex '{REGIONAL_PRICE_V7_EXCLUSION_PATTERN}'
+| extend Exposure = case(
+        ReportedExcluded == true, 'Reported regional exclusion - not a universal exemption',
+        isempty(Series), 'Potential exposure - series/scope unknown',
+        'Potential exposure - verify advisory and agreement')
+| extend EffectiveDate = datetime({PRICE_EFFECTIVE}),
+         Evidence = 'Public Q&A reproduction of customer notification; not a formal public announcement',
+         Scope = 'VM compute only; not a bill estimate. Confirm meters, contract, reservations and regional scope in Service Health. Separate legacy-series changes may apply.',
+         Source = '{REGIONAL_PRICE_SOURCE}'
+| project Name, ResourceGroup, Region, VmSize, Instances, Series, Exposure,
+          AnnouncedRegionalPercent, EffectiveDate, Evidence, Scope, Source, ResourceId
+| order by AnnouncedRegionalPercent desc, Region asc, Name asc"""
+
+
+def sql_extension_query():
+    return """resources
+| where type =~ 'microsoft.compute/virtualmachines/extensions'
+| where tostring(properties.publisher) =~ 'Microsoft.SqlServer.Management'
+| where tostring(properties.type) =~ 'SqlIaaSAgent'
+    or tostring(properties.typePropertiesType) =~ 'SqlIaaSAgent'
+| extend ParentOffset = indexof(tolower(id), '/extensions/')
+| where ParentOffset > 0
+| extend VmId = tolower(substring(id, 0, ParentOffset)),
+         ExtensionName = tostring(split(name, '/')[-1]),
+         ExtensionState = tostring(properties.provisioningState)
+| extend ExtensionState = iff(isempty(ExtensionState), 'Unknown', ExtensionState)
+| summarize SqlExtensionCount = count(),
+            SqlExtensions = strcat_array(make_set(ExtensionName, 20), ', '),
+            ExtensionStates = strcat_array(make_set(ExtensionState, 20), ', ')
+    by VmId"""
+
+
+def sql_modernization_query(sku_map, regions, region_ids):
+    return base_query(
+        sku_map, regions, region_ids, include_optional=False, use_lookup_parameters=True,
+        include_flexible_members=True) + f"""
+| where not(IsVmss)
+| extend VmId = tolower(ResourceId)
+| join kind=inner (
+{sql_extension_query()}
+  ) on VmId
+| extend Opportunity = 'Retiring VM with SQL IaaS extension - assess modernization',
+         SqlRuntime = 'Unverified - extension presence does not prove SQL is running',
+         Assessment = 'Validate SQL instances/version/edition, database compatibility, dependencies, HA/DR, performance, licensing and downtime; assess Azure SQL Managed Instance, Azure SQL Database or supported SQL on modern VMs.',
+         Guidance = 'https://learn.microsoft.com/azure/azure-sql/migration-guides/'
+| project Name, ResourceGroup, Region, VmSize, Lifecycle, RetiresOn, PowerState,
+          SqlExtensions, ExtensionStates, SqlExtensionCount, Opportunity,
+          SqlRuntime, Assessment, RecommendedTarget, Guidance, ResourceId
+| order by RetiresOn asc, Name asc"""
 
 
 # --------------------------------------------------------------------------
@@ -922,6 +1011,7 @@ def build(data):
     })
 
     tabs = [("Overview", "overview"), ("Impacted resources", "impacted"),
+            ("SQL modernization", "sql"),
             ("Upgrade paths", "paths"),
             ("Target mapping", "mapping"), ("Prerequisites", "prereq"),
             ("Migration plan", "plan"), ("About", "about")]
@@ -1084,19 +1174,19 @@ def build(data):
     # ---------------- TAB 2: Impacted resources ----------------
     imp = []
     imp.append(text_item(
-        "### Impacted resources\n"
+        "### VM retirement / end of life\n"
         "Every VM and scale set whose current size carries an announced retirement or "
         "end-of-life status. **Readiness** is scored 0-100 against your real configuration; "
         "**Blockers** lists the prerequisite work that must happen before the move.",
         "imp-intro"))
     imp.append(arg_query(
-        base + """
+        base_impacted + """
 | where '{LifecycleFilter}' has Lifecycle
 | project Name, ResourceGroup, Region, VmSize, Instances, VmGeneration,
           RecommendedTarget, TargetInRegion, RetiresOn, ReadinessScore,
           Blockers, ResourceId
 | order by ReadinessScore asc, RetiresOn asc""",
-        "imp-grid", size=1, export=True, title="Impacted virtual machines and scale sets",
+        "imp-grid", size=1, export=True, title="Retiring virtual machines and scale sets",
         grid=grid_settings(
             # Sized in ch to the actual content. Percentage widths bottom out at
             # roughly 130px per column, which leaves short values like "V1" or
@@ -1133,7 +1223,81 @@ def build(data):
                 {"columnId": "RetiresOn", "label": "Retires on"},
                 {"columnId": "ReadinessScore", "label": "Readiness"},
             ])))
+    imp.append(text_item(
+        "### Potential regional price exposure\n\n"
+        "This is **independent of retirement** and the Lifecycle status filter: modern VMs "
+        "can appear here even when they are not retiring. A resource can appear in both sections. "
+        "The retirement summary tiles remain retirement-only.\n\n"
+        "**Unverified pricing scope.** The source is a [public Microsoft Learn Q&A post "
+        "reproducing a customer notification](" + REGIONAL_PRICE_SOURCE + "), not a formal public "
+        "Microsoft announcement. It reports regional changes effective **1 February 2027**: "
+        "North Europe 17%; France Central/South 11%; West Europe and Norway East/West 9%; "
+        "Southeast Asia 8%. Confirm the authoritative Service Health advisory and agreement "
+        "before customer communication or financial decisions.\n\n"
+        "The table includes VMs/scale sets in those seven regions, including **reported exclusions** "
+        "for context. A reported exclusion applies only to this regional update, not every price "
+        "change. Unknown series are not assumed exempt. Percentages describe the reported region "
+        "adjustment, **not an applied per-resource increase or an invoice forecast**. This section "
+        "does not inventory Storage accounts/meters and is separate from the legacy-series "
+        "pricing signal elsewhere in the workbook.",
+        "regional-price-intro"))
+    imp.append(arg_query(
+        regional_price_query(data), "regional-price-grid", size=1, export=True,
+        title="VMs in regions with reported pricing changes - potential exposure",
+        grid=grid_settings(
+            {"Name": "18ch", "ResourceGroup": "18ch", "Region": "15ch", "VmSize": "20ch",
+             "Instances": "10ch", "Exposure": "45ch", "AnnouncedRegionalPercent": "17ch",
+             "EffectiveDate": "13ch"},
+            [fmt("Name", 1, formatOptions={"linkColumn": "ResourceId", "linkTarget": "Resource",
+                                          "linkIsContextBlade": True}),
+             date_col("EffectiveDate"), fmt("ResourceId", 5),
+             fmt("Source", 1, formatOptions={"linkTarget": "Url"})],
+            filter=True,
+            labelSettings=[
+                {"columnId": "VmSize", "label": "Current size"},
+                {"columnId": "ResourceGroup", "label": "Resource group"},
+                {"columnId": "AnnouncedRegionalPercent", "label": "Reported regional %"},
+                {"columnId": "EffectiveDate", "label": "Reported effective date"},
+            ])))
     items.append(group_item("grp-impacted", "impacted", imp))
+
+    sql = [text_item(
+        "## SQL modernization opportunities on retiring VMs\n\n"
+        "These **retiring/end-of-life VMs** have a SQL IaaS Agent extension identified by "
+        "publisher **Microsoft.SqlServer.Management** and handler **SqlIaaSAgent**, not by "
+        "a VM name or SQL-looking image. Each VM appears once; extension provisioning states "
+        "are shown, including failed or unknown states. Lifecycle filtering is retirement-only "
+        "and independent of the global Lifecycle status selector.\n\n"
+        "**Discovery signal, not certification.** Extension presence does not establish that "
+        "SQL Server is installed, running, in use or suitable for a managed database service. "
+        "A stopped VM remains an assessment candidate; its power state is shown when available. "
+        "VMs without a visible matching extension are **not proven SQL-free**. Limited permissions, "
+        "ARG indexing, registration mode and unsupported/unrecognized handlers can cause omissions. "
+        "Flexible scale-set member VMs are evaluated individually here; scale-set models and "
+        "Uniform instances without individual ARG VM records are not included.\n\n"
+        "Confirm engine/version/edition, databases, dependencies (SQL Agent jobs, linked servers, "
+        "SSIS/SSRS and cross-database features), HA/DR, performance, licensing and downtime. "
+        "Assess **Azure SQL Managed Instance**, **Azure SQL Database**, or supported SQL Server "
+        "on modern VMs based on evidence, not extension presence alone.\n\n"
+        "[SQL IaaS Agent registration](https://learn.microsoft.com/azure/azure-sql/virtual-machines/windows/sql-agent-extension-manually-register-single-vm) "
+        "| [SQL migration guidance](https://learn.microsoft.com/azure/azure-sql/migration-guides/)",
+        "sql-intro")]
+    sql.append(arg_query(
+        sql_modernization_query(sku_map, tgt_regions, region_ids), "sql-modernization-grid",
+        size=1, export=True, title="Retiring VMs with SQL IaaS Agent extension evidence",
+        grid=grid_settings(
+            {"Name": "20ch", "ResourceGroup": "18ch", "Region": "13ch", "VmSize": "20ch",
+             "RetiresOn": "13ch", "PowerState": "12ch", "ExtensionStates": "18ch",
+             "Opportunity": "42ch", "Assessment": "55ch"},
+            [fmt("Name", 1, formatOptions={"linkColumn": "ResourceId", "linkTarget": "Resource",
+                                          "linkIsContextBlade": True}),
+             date_col("RetiresOn"), fmt("ResourceId", 5),
+             fmt("Guidance", 1, formatOptions={"linkTarget": "Url"})],
+            filter=True,
+            labelSettings=[{"columnId": "VmSize", "label": "Retiring size"},
+                           {"columnId": "ExtensionStates", "label": "Extension state"},
+                           {"columnId": "SqlRuntime", "label": "SQL runtime evidence"}])))
+    items.append(group_item("grp-sql", "sql", sql))
 
     # ---------------- TAB 3: Target mapping ----------------
     mapping = []
@@ -1188,7 +1352,7 @@ def build(data):
     mapping.append(text_item(
         "#### Alternates, series notes and commercial impact\n"
         "The same sizes again, with the other targets worth evaluating, what changes at the "
-        "series level, and the commercial position: whether the 1 February 2027 pricing update "
+        "series level, and the commercial position: whether the separate legacy-series 1 February 2027 pricing update "
         "applies to the series, and when Reserved Instance coverage ends.\n\n"
         "> Reserved Instance purchases and renewals for these series ended **1 July 2026**. "
         "When an existing reservation expires the workload bills at pay-as-you-go rates, "
@@ -1481,14 +1645,19 @@ def build(data):
         "| Scale set | 5 | Model-level SKU change |\n\n"
         "A VM already running Generation 2 takes **no** Gen1 penalty even when its target is "
         "Gen2-only. That is the difference between scoring the size and scoring your fleet.\n\n"
-        "**Lifecycle and pricing changes.** A pricing update takes effect **1 February 2027** "
+        "**Legacy-series pricing changes.** A pricing update takes effect **1 February 2027** "
         "for selected v1 and v2 size series. The workbook flags which of your series are in "
         "scope; it does not restate the rate change, because the applicable figures are "
         "communicated to each tenant through its own Azure Service Health notification "
         "and depend on the agreement. For authoritative rates see the official "
         "[Windows](https://azure.microsoft.com/pricing/details/virtual-machines/windows/) and "
         "[Linux](https://azure.microsoft.com/pricing/details/virtual-machines/linux/) VM "
-        "pricing pages.\n\n"
+        "pricing pages. This flag is separate from the regional exposure section.\n\n"
+        "**Regional pricing exposure.** The Impacted resources tab separately shows VMs in "
+        "seven regions with publicly reproduced notification changes. Its figures are not a "
+        "formal public announcement, contractual rates or a bill forecast. Confirm Service "
+        "Health scope and your agreement; regional exclusions do not exempt a series from "
+        "other pricing changes. Modern VMs may have potential regional exposure without retiring.\n\n"
         "**Reserved Instances.** Purchases and renewals ended **1 July 2026** for one-year "
         "reservations on Av2, Amv2, Bv1, D, Ds, Dv2, Dsv2, F, Fs, Fsv2, G, Gs, Ls and Lsv2, "
         "and for both one- and three-year reservations on Dv3, Dsv3, Ev3 and Esv3. Existing "
@@ -1498,7 +1667,8 @@ def build(data):
         "**Cloud coverage.** The two changes do not have the same scope:\n\n"
         "| | Azure public | 21Vianet | Sovereign / Government |\n| --- | :---: | :---: | :---: |\n"
         "| v3 retirement | Applies | Exempt | Exempt |\n"
-        "| 1 Feb 2027 pricing update | Applies | Applies | Exempt |\n\n"
+        "| Legacy-series 1 Feb 2027 pricing update | Applies | Applies | Exempt |\n\n"
+        "This table does not establish the scope of the separate regional notification.\n\n"
         "This workbook does not detect cloud type. If you are running in Azure Government, "
         "a sovereign cloud, or 21Vianet, read the rows above before acting on a flag.\n\n"
         "**Capacity growth restrictions.** Separate from retirement. Existing subscriptions "

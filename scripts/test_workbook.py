@@ -56,11 +56,17 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 17)
+        self.assertEqual(len(queries), 19)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
             if name == "about-allsizes":
                 self.assertEqual(expanded, query)
+            elif name == "regional-price-grid":
+                self.assertEqual(expanded, builder.regional_price_query(self.data))
+            elif name == "sql-modernization-grid":
+                expected = builder.base_query(sku_map, regions, region_ids,
+                                              include_optional=False, include_flexible_members=True)
+                self.assertTrue(expanded.startswith(expected), name)
             elif name.startswith("path-v"):
                 generation = int(name[6])
                 lookup = builder.build_lookups(self.data, path_generation=generation)
@@ -73,6 +79,51 @@ class WorkbookDeploymentTests(unittest.TestCase):
 
     def test_structure_is_valid(self):
         self.assertEqual(structure_check(self.workbook), [])
+
+    def test_retirement_and_regional_prices_are_independent_sections(self):
+        group = next(i for i in self.workbook["items"] if i["name"] == "grp-impacted")
+        queries = {i["name"]: i["content"]["query"] for i in group["content"]["items"]
+                   if i["type"] == 3}
+        self.assertEqual(set(queries), {"imp-grid", "regional-price-grid"})
+        self.assertIn("| where Lifecycle != 'OPTIONAL'", queries["imp-grid"])
+        regional = queries["regional-price-grid"]
+        self.assertNotIn("{LifecycleFilter}", regional)
+        self.assertNotIn("{LifecycleSkuMap}", regional)
+        self.assertNotIn("| where isnotempty(Rec)", regional)
+        self.assertIn("series/scope unknown", regional)
+        self.assertIn("not a universal exemption", regional)
+        self.assertIn("not a formal public announcement", regional)
+        self.assertEqual(builder.REGIONAL_PRICE_INCREASES, {
+            "northeurope": 17, "francecentral": 11, "francesouth": 11,
+            "westeurope": 9, "norwayeast": 9, "norwaywest": 9, "southeastasia": 8})
+        self.assertNotIn("Dsv5", builder.REGIONAL_PRICE_EXCLUDED_SERIES)
+        self.assertNotIn("Dsv6", builder.REGIONAL_PRICE_EXCLUDED_SERIES)
+
+    def test_v7_exclusions_do_not_exempt_all_v7_skus(self):
+        import re
+        pattern = builder.REGIONAL_PRICE_V7_EXCLUSION_PATTERN
+        for sku in ("standard_d2s_v7", "standard_d4lds_v7", "standard_e16-4ds_v7"):
+            self.assertRegex(sku, pattern)
+        for sku in ("standard_d2as_v7", "standard_e2ads_v7", "standard_d2s_v6"):
+            self.assertIsNone(re.fullmatch(pattern, sku))
+
+    def test_sql_candidates_require_extension_identity_and_retirement(self):
+        queries = []
+        walk(self.workbook, queries)
+        query = dict(queries)["sql-modernization-grid"]
+        self.assertIn("| where Lifecycle != 'OPTIONAL'", query)
+        self.assertIn("| where not(IsVmss)", query)
+        self.assertNotIn("isempty(tostring(properties.virtualMachineScaleSet.id))", query)
+        self.assertIn("properties.publisher) =~ 'Microsoft.SqlServer.Management'", query)
+        self.assertIn("properties.type) =~ 'SqlIaaSAgent'", query)
+        self.assertIn("properties.typePropertiesType) =~ 'SqlIaaSAgent'", query)
+        self.assertIn("SqlExtensionCount = count()", query)
+        self.assertIn("| join kind=inner", query)
+        self.assertNotIn("{LifecycleFilter}", query)
+        self.assertIn("does not prove SQL is running", query)
+        self.assertNotIn("| where ExtensionState", query)
+        group = next(i for i in self.workbook["items"] if i["name"] == "grp-sql")
+        self.assertEqual(group["conditionalVisibility"]["value"], "sql")
 
     def test_upgrade_paths_are_two_half_width_panels_in_one_tab(self):
         group = next(i for i in self.workbook["items"] if i["name"] == "grp-paths")
