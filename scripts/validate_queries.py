@@ -88,11 +88,17 @@ def structure_check(wb):
                     f"{name}: parameter '{p}' used without braces at offset {m.start()} "
                     f"- must be written as {{{p}}}")
 
-    for i in items:
-        for node in [i] + (i.get("content", {}).get("items", []) if i.get("type") == 12 else []):
+    def check_scope(node):
+        if isinstance(node, dict):
             c = node.get("content", {})
-            if c.get("queryType") == 1 and c.get("crossComponentResources") != ["{Subscriptions}"]:
+            if isinstance(c, dict) and c.get("queryType") == 1 and c.get("crossComponentResources") != ["{Subscriptions}"]:
                 problems.append(f"{node.get('name')}: ARG query not scoped to {{Subscriptions}}")
+            for value in node.values():
+                check_scope(value)
+        elif isinstance(node, list):
+            for value in node:
+                check_scope(value)
+    check_scope(wb)
 
     return problems
 

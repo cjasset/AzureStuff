@@ -52,6 +52,7 @@ Gen1 VMs, one Gen2 VM and one v3 end-of-life VM.</sub>
 | --- | --- |
 | **Overview** | Fleet summary tiles (impacted resources, instances, retirement vs end-of-life split, count needing prerequisite work, fleet readiness score, days to next retirement), urgency and actual-VM-generation donuts, complexity breakdown, commercial impact (pricing update and Reserved Instance status), top affected sizes |
 | **Impacted resources** | Every affected VM and scale set with region, actual Hyper-V generation, recommended target, target region availability, readiness score and named blockers. The resource name deep-links to the resource |
+| **Upgrade paths** | Side-by-side V5 and V6 panels, each with independently selected targets, per-resource prerequisites, observed OS/encryption/image signals, validation gaps and its own checklist |
 | **Target mapping** | Two grids. *Recommended targets*: current spec, recommended target, memory-preserving alternative, retirement date — the size name links to the announcement. *Alternates, series detail and commercial impact*: up to three alternates, size-level considerations, series spec deltas, whether the 1 Feb 2027 pricing update applies, and when Reserved Instance coverage ends |
 | **Prerequisites** | Prerequisites triggered by *this* fleet, ranked Blocking / Validate / Plan, with what to do, why it matters, how to do it and a docs link, plus the count of affected resources and the sizes involved |
 | **Migration plan** | Five suggested waves, a burn-down by retirement quarter, and the long-pole workloads to start first |
@@ -72,6 +73,35 @@ the kind of spec jump that changes per-core licensing, which is why the current 
 target specs sit side by side.
 
 ![Target mapping tab](docs/images/target-mapping.png)
+
+### Upgrade paths: V5 and V6 side by side
+
+Select **Upgrade paths** to compare the same retiring resources in two half-width
+panels. Each selects a target from that generation's captured catalogue; a missing
+match is **manual selection required**, never a silent fallback to another generation.
+
+- **V5:** a non-NVMe target preserving the source's required architecture, CPU,
+  memory, local-disk presence/known capacity and premium-storage support. Do not
+  force Gen1 conversion, an OS upgrade or decryption when the selected resize
+  target does not require that conversion.
+- **V6:** independently evaluated Gen2/NVMe requirements. Gen1 conversion or a
+  rebuild, OS eligibility, image/disk/boot-driver compatibility and actual boot
+  rehearsal are called out where applicable. Unknown target local-disk capacity
+  stays unverified, not assumed equal.
+- **Both:** MANA/accelerated networking is independent of the disk controller.
+  Validate quota/restrictions/policy, zone/cluster availability, storage performance,
+  disk/NIC limits, application behavior, recoverable backups and rollback.
+
+The OS disk's ADE configuration is an observed **configuration signal**, not proof
+of current guest BitLocker state. A Server 2016 image SKU is an **image hint**, not
+proof that the guest has not since been upgraded. Custom/gallery lineage does not
+prove a missing driver. These unknowns remain visible in both panels.
+
+Windows OS/encryption and Backup/ASR prerequisites of the documented
+Gen1-to-Trusted-Launch conversion are explicitly distinguished from an ordinary
+resize or a rebuild. No guest inspection or migration is performed by the workbook.
+Each panel exports the additional evidence columns; neither displays a synthetic
+"ready" score while guest compatibility is unverified.
 
 ### Prerequisites
 
@@ -211,7 +241,7 @@ The first row is the dangerous one: a production VM sequenced into wave 1.
 ## The queries
 
 Every Azure Resource Graph query the workbook runs is documented verbatim in
-[`docs/QUERIES.md`](docs/QUERIES.md) - 15 read-only queries, with the shared base
+[`docs/QUERIES.md`](docs/QUERIES.md) - 17 read-only queries, with the shared base
 pipeline shown once and each per-tab tail alongside it. Nothing is hidden: you
 can audit exactly what executes against your tenant before you deploy.
 
@@ -290,7 +320,7 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # structural checks + run all 15 queries live
+python scripts/validate_queries.py    # structural checks + run all 17 queries live
 ```
 
 `build_workbook.py` writes four files: the workbook and ARM template under
@@ -303,7 +333,7 @@ Without `--offline`, `validate_queries.py` needs `az login` and the
 `resource-graph` CLI extension. It
 verifies that tab links match group visibility conditions, that every query is
 scoped to `{Subscriptions}` and references only declared parameters, and that all
-15 Resource Graph queries execute successfully. Azure Resource Graph throttles
+17 Resource Graph queries execute successfully. Azure Resource Graph throttles
 aggressive callers, so an occasional single-query failure on a back-to-back run is
 a rate limit rather than a regression - re-run to confirm.
 
@@ -334,7 +364,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 15 queries while keeping the saved workbook below
+628-size catalogue and all 17 queries while keeping the saved workbook below
 1 MB. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
 

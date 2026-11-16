@@ -31,7 +31,14 @@ REFS = _LOCAL_REFS if os.path.exists(
 OUT = os.path.join(ROOT, "out")
 WORKBOOK_DIR = os.path.join(ROOT, "workbook")
 WORKBOOK_SIZE_LIMIT = 1_000_000
-LOOKUP_PARAMETERS = ("LifecycleSkuMap", "TargetRegionMap", "RegionIdMap")
+BASE_LOOKUP_PARAMETERS = ("LifecycleSkuMap", "TargetRegionMap", "RegionIdMap")
+PATH_LOOKUP_PARAMETERS = {
+    generation: (f"V{generation}PathSkuMap", f"V{generation}PathRegionMap",
+                 f"V{generation}PathRegionIdMap")
+    for generation in (5, 6)
+}
+LOOKUP_PARAMETERS = BASE_LOOKUP_PARAMETERS + tuple(
+    name for names in PATH_LOOKUP_PARAMETERS.values() for name in names)
 
 # Preview mode: restrict the embedded lookup to a named set of sizes so the
 # generated workbook is small enough to paste into the portal for visual review.
@@ -89,6 +96,8 @@ WARN_SHORT = {
     "cpu_architecture_change": "a",
     "v5_target_review": "u",
     "mana_validation": "h",
+    "path_target_unavailable": "k",
+    "target_local_disk_capacity_unverified": "l",
 }
 SHORT_WARN = {v: k for k, v in WARN_SHORT.items()}
 
@@ -247,6 +256,63 @@ def num(v):
         return str(v)
 
 
+def compatible_targets(record, generation, allow_unknown_temp_capacity=False):
+    current = record.get("current") or {}
+    return [
+        t for t in record.get("targets") or []
+        if t.get("sku", "").endswith(f"_v{generation}")
+        and t.get("nvme_required") in (True, False)
+        and (generation != 5 or t.get("nvme_required") is False)
+        and t.get("cpu_arch") == current.get("cpu_arch")
+        and current.get("cpu_arch") is not None
+        and t.get("hyperv_generations")
+        and t.get("vcpu") is not None and current.get("vcpu") is not None
+        and t["vcpu"] >= current["vcpu"]
+        and t.get("memory_gb") is not None and current.get("memory_gb") is not None
+        and t["memory_gb"] >= current["memory_gb"]
+        and (current.get("has_temp_disk") is False or t.get("has_temp_disk") is True)
+        and (current.get("temp_disk_gb") is None
+             or (allow_unknown_temp_capacity and t.get("temp_disk_gb") is None)
+             or (t.get("temp_disk_gb") is not None
+                 and t["temp_disk_gb"] >= current["temp_disk_gb"]))
+        and (current.get("premium_io") is False or t.get("premium_io") is True)
+    ]
+
+
+def target_warning_codes(record, target):
+    current = record.get("current") or {}
+    codes = {w["code"] for w in record.get("warnings") or []} - {
+        "gen1_not_supported", "nvme_required", "cpu_architecture_change",
+        "memory_downgrade", "temp_disk_removed", "no_exact_vcpu_match",
+        "narrow_regional_availability", "no_three_az_regions", "v5_target_review",
+    }
+    if "V1" not in target["hyperv_generations"].split(","):
+        codes.add("gen1_not_supported")
+    if target["nvme_required"]:
+        codes.add("nvme_required")
+    if target["vcpu"] != current["vcpu"]:
+        codes.add("no_exact_vcpu_match")
+    if target.get("deployable_region_count", 0) < 10:
+        codes.add("narrow_regional_availability")
+    if target.get("az3_region_count", 0) == 0:
+        codes.add("no_three_az_regions")
+    if current.get("has_temp_disk") and target.get("temp_disk_gb") is None:
+        codes.add("target_local_disk_capacity_unverified")
+    if target.get("accelerated_networking") is True:
+        codes.add("mana_validation")
+    return codes
+
+
+def select_path_target(record, generation):
+    candidates = compatible_targets(record, generation, allow_unknown_temp_capacity=(generation == 6))
+    if not candidates:
+        return {}, {}, {"path_target_unavailable"}
+    current = record["current"]
+    target = min(candidates, key=lambda t: (
+        t["vcpu"] - current["vcpu"], t["memory_gb"] - current["memory_gb"]))
+    return target, target, target_warning_codes(record, target)
+
+
 def select_targets(record, impacted):
     """Prefer a catalogued non-NVMe v5 target without weakening source capacity."""
     targets = record.get("targets") or []
@@ -259,40 +325,12 @@ def select_targets(record, impacted):
 
     if impacted and (preferred.get("nvme_required") or
                      preferred.get("sku", "").endswith(("_v6", "_v7"))):
-        candidates = [
-            t for t in targets
-            if t.get("sku", "").endswith("_v5")
-            and t.get("nvme_required") is False
-            and t.get("cpu_arch") == current.get("cpu_arch")
-            and current.get("cpu_arch") is not None
-            and t.get("hyperv_generations")
-            and t.get("vcpu") is not None and current.get("vcpu") is not None
-            and t.get("vcpu") >= current["vcpu"]
-            and t.get("memory_gb") is not None and current.get("memory_gb") is not None
-            and t.get("memory_gb") >= current["memory_gb"]
-            and (current.get("has_temp_disk") is False or t.get("has_temp_disk") is True)
-            and (current.get("temp_disk_gb") is None or
-                 (t.get("temp_disk_gb") is not None
-                  and t["temp_disk_gb"] >= current["temp_disk_gb"]))
-            and (current.get("premium_io") is False or t.get("premium_io") is True)
-        ]
+        candidates = compatible_targets(record, 5)
         if candidates:
             preferred = min(candidates, key=lambda t: (
                 t["vcpu"] - current["vcpu"], t["memory_gb"] - current["memory_gb"]))
             memory_target = preferred
-            codes -= {
-                "gen1_not_supported", "nvme_required", "cpu_architecture_change",
-                "memory_downgrade", "temp_disk_removed", "no_exact_vcpu_match",
-                "narrow_regional_availability", "no_three_az_regions",
-            }
-            if "V1" not in preferred["hyperv_generations"].split(","):
-                codes.add("gen1_not_supported")
-            if preferred["vcpu"] != current["vcpu"]:
-                codes.add("no_exact_vcpu_match")
-            if preferred.get("deployable_region_count", 0) < 10:
-                codes.add("narrow_regional_availability")
-            if preferred.get("az3_region_count", 0) == 0:
-                codes.add("no_three_az_regions")
+            codes = target_warning_codes(record, preferred)
         else:
             codes.add("v5_target_review")
 
@@ -302,7 +340,7 @@ def select_targets(record, impacted):
     return preferred, memory_target, codes
 
 
-def build_lookups(data):
+def build_lookups(data, path_generation=None):
     skus = data["skus"]
     sku_map = {}
     spec_map = {}
@@ -341,7 +379,11 @@ def build_lookups(data):
         cur = r.get("current") or {}
         targets = r.get("targets") or []
         impacted = tier in ("RETIRE", "EOL")
-        preferred, mp, warning_codes = select_targets(r, impacted)
+        if path_generation is not None and not impacted:
+            continue
+        preferred, mp, warning_codes = (
+            select_path_target(r, path_generation) if path_generation is not None
+            else select_targets(r, impacted))
         codes = sorted({WARN_SHORT.get(code, "") for code in warning_codes} - {""})
         alts = list(dict.fromkeys(t["sku"] for t in targets
                                  if t.get("sku") != preferred.get("sku")))[:3]
@@ -407,13 +449,13 @@ def expand_lookups(query, workbook):
 
 
 def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
-               use_lookup_parameters=False):
+               use_lookup_parameters=False, lookup_parameters=BASE_LOOKUP_PARAMETERS):
     """
     Core Azure Resource Graph query: fleet inventory joined to the lifecycle
     lookup, with a readiness score computed from real fleet attributes.
     """
     if use_lookup_parameters:
-        m, reg, rids = ("{" + name + "}" for name in LOOKUP_PARAMETERS)
+        m, reg, rids = ("{" + name + "}" for name in lookup_parameters)
     else:
         m, reg, rids = (kql_bag(value) for value in (sku_map, tgt_regions, region_ids))
 
@@ -437,12 +479,17 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
 | extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])
 | extend Zone = tostring(zones[0])
 | extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))
+| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))
+| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))
+| extend GuestOsName = tostring(properties.extended.instanceView.osName)
 | project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, Zone, ImageSku, IsVmss, Tags = tags
+          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags
 | join kind=leftouter (
     resources
     | where type =~ 'microsoft.compute/disks'
-    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration)
+    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),
+              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),
+              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)
   ) on OsDiskId
 | extend VmGeneration = case(
         isnotempty(DiskGen), DiskGen,
@@ -524,6 +571,8 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         iff(PenNvme > 0, 'NVMe boot validation, ', ''),
         iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),
         iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),
+        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),
+        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),
         iff(PenRegion > 0, 'Target not in region, ', ''),
         iff(PenVcpu > 0, 'vCPU count change, ', '')))
 | extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)
@@ -537,6 +586,8 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),
         iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),
         iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),
+        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),
+        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),
         iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),
         iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),
         iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))
@@ -661,12 +712,112 @@ def group_item(name, tab_value, items):
     }
 
 
+def upgrade_path_panel(generation, lookups):
+    sku_map, _, _, regions, region_ids = lookups
+    query = base_query(
+        sku_map, regions, region_ids, include_optional=False, use_lookup_parameters=True,
+        lookup_parameters=PATH_LOOKUP_PARAMETERS[generation])
+    query += """
+| extend ImageProvenance = case(
+        isnotempty(ImageId), 'Custom/gallery image - verify guest drivers',
+        isnotempty(ImagePublisher), 'Marketplace origin - guest changes unverified',
+        'Unknown image lineage - verify guest drivers')
+| extend OsEvidence = case(
+        isnotempty(GuestOsName), strcat('Guest OS metadata: ', GuestOsName),
+        OsType =~ 'Windows' and ImageSku contains '2016', 'Server 2016 image hint - current guest OS unverified',
+        'Guest OS version unverified')
+| extend EncryptionEvidence = iff(DiskAdeConfigured == true,
+        'OS disk encryption configuration detected - guest state unverified',
+        'Guest BitLocker/ADE state unverified')
+| extend ConversionOsCheck = case(
+        OsType !~ 'Windows' or NeedsGen2 == 0, '',
+        GuestOsName contains '2016', '; Server 2016 detected: OS upgrade/rebuild before documented Trusted Launch conversion',
+        isempty(GuestOsName) and ImageSku contains '2016', '; Server 2016 image hint: confirm guest version; upgrade/rebuild if still 2016 before documented Trusted Launch conversion',
+        '; Verify Windows OS eligibility for the chosen conversion route')
+| extend ConversionEncryptionCheck = case(
+        OsType !~ 'Windows' or NeedsGen2 == 0, '',
+        DiskAdeConfigured == true, '; Encryption config detected: address Windows OS encryption before documented Trusted Launch conversion',
+        '; Guest encryption unknown: check BitLocker/ADE before conversion')
+| extend Prerequisites = iff(isempty(RecommendedTarget),
+        'No compatible target in this generation in the captured catalogue - manual selection required',
+        strcat('Generation ', VmGeneration, ': ', Blockers,
+            ConversionOsCheck, ConversionEncryptionCheck,
+            iff(NeedsGen2 == 1, '; Convert/rebuild to Gen2; validate partition layout and chosen route; Backup/ASR prerequisites apply to Trusted Launch conversion', ''),
+            iff(PenNvme > 0 and isnotempty(DiskControllers) and DiskControllers !contains 'NVMe',
+                '; Current OS disk does not advertise NVMe - validate image/disk/boot-driver compatibility', '')))
+| extend Validation = strcat('Catalogue region: ', TargetInRegion, '. ', OsEvidence, '. ',
+        EncryptionEvidence, '. ', ImageProvenance,
+        '. Unverified: MANA/traffic, target quota/policy/capacity, storage IOPS/NIC limits, application/rollback.',
+        iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
+| extend Resource = strcat(Name, ' [', VmSize, ']'),
+         Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
+         ConversionRequired = iff(isempty(RecommendedTarget) or VmGeneration == 'Unknown', tobool(''), NeedsGen2 == 1),
+         NvmeRequired = iff(isempty(RecommendedTarget), tobool(''), PenNvme > 0)
+| project Resource, Target, Prerequisites, Validation, ResourceId,
+          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence
+| order by Resource asc"""
+    guidance = (
+        "Prefer a catalogued non-NVMe v5 target. Gen1 conversion is required only "
+        "if that selected target is Gen2-only; do not assume decryption or an OS "
+        "upgrade is mandatory for every v5 resize."
+        if generation == 5 else
+        "Evaluate a catalogued v6 target independently. Gen2-only and NVMe requirements "
+        "come from that target's metadata, not the version label alone. Rehearse boot "
+        "from the actual legacy image/disk before rollout.")
+    checklist = (
+        "**Before a v5 resize**\n\n"
+        "- Confirm the target supports the actual VM generation and existing controller.\n"
+        "- Validate MANA/accelerated networking on target hardware independently of NVMe.\n"
+        "- Check OS/image support, ADE restrictions, disk/NIC limits and local-disk capacity/performance.\n"
+        "- Check subscription quota, restrictions, policy, zone/cluster availability and downtime.\n"
+        "- Take recoverable backups; test applications and rollback.\n\n"
+        "Gen1, Server 2016 and ADE are not blanket v5 blockers."
+        if generation == 5 else
+        "**Before a v6 migration**\n\n"
+        "- For a Gen2-only target, convert or rebuild Gen1 guests; confirm supported OS and partition/EFI layout.\n"
+        "- For [Gen1-to-Trusted-Launch conversion](https://learn.microsoft.com/azure/virtual-machines/trusted-launch-existing-vm-gen-1), "
+        "check Server 2016 exclusion, Windows OS encryption, Backup policy and ASR prerequisites. Rebuilding is a separate route.\n"
+        "- If required, validate NVMe image/disk capability, boot-critical driver and an actual converted-disk boot.\n"
+        "- Validate MANA hardware, driver and traffic separately; custom image origin is not proof of a missing driver.\n"
+        "- Confirm local-disk capacity/performance, disk/NIC limits, quota/policy/zone/cluster availability, applications and rollback.")
+    hidden = ("ResourceId", "VmGeneration", "ConversionRequired", "NvmeRequired",
+              "ImageProvenance", "OsEvidence", "EncryptionEvidence")
+    return {
+        "type": 12,
+        "name": f"path-v{generation}-panel",
+        "customWidth": "50",
+        "content": {
+            "version": "NotebookGroup/1.0", "groupType": "editable",
+            "items": [
+                text_item(f"### V{generation} upgrade path\n\n{guidance}", f"path-v{generation}-intro"),
+                arg_query(
+                    query, f"path-v{generation}-grid", size=1, export=True,
+                    title=f"V{generation} targets and prerequisites",
+                    grid=grid_settings(
+                        {"Resource": "24%", "Target": "18%", "Prerequisites": "32%", "Validation": "26%"},
+                        [fmt("Resource", 1, formatOptions={"linkColumn": "ResourceId",
+                                                         "linkTarget": "Resource",
+                                                         "linkIsContextBlade": True})]
+                        + [fmt(name, 5) for name in hidden],
+                        filter=True)),
+                text_item(checklist, f"path-v{generation}-checklist"),
+            ],
+        },
+    }
+
+
 # --------------------------------------------------------------------------
 # Build
 # --------------------------------------------------------------------------
 
 def build(data):
     sku_map, spec_map, url_map, tgt_regions, region_ids = build_lookups(data)
+    path_lookups = {generation: build_lookups(data, path_generation=generation)
+                    for generation in (5, 6)}
+    shared_lookups = dict(zip(BASE_LOOKUP_PARAMETERS, (sku_map, tgt_regions, region_ids)))
+    for generation, lookup in path_lookups.items():
+        shared_lookups.update(zip(PATH_LOOKUP_PARAMETERS[generation],
+                                  (lookup[0], lookup[3], lookup[4])))
     base = base_query(sku_map, tgt_regions, region_ids, use_lookup_parameters=True)
     base_impacted = base + "\n| where Lifecycle != 'OPTIONAL'"
 
@@ -762,8 +913,7 @@ def build(data):
                     "isHiddenWhenLocked": True,
                     "value": kql_bag(value),
                 }
-                for i, (name, value) in enumerate(zip(
-                    LOOKUP_PARAMETERS, (sku_map, tgt_regions, region_ids)), 1)
+                for i, (name, value) in enumerate(shared_lookups.items(), 1)
             ],
             "style": "pills",
         },
@@ -771,6 +921,7 @@ def build(data):
     })
 
     tabs = [("Overview", "overview"), ("Impacted resources", "impacted"),
+            ("Upgrade paths", "paths"),
             ("Target mapping", "mapping"), ("Prerequisites", "prereq"),
             ("Migration plan", "plan"), ("About", "about")]
     items.append({
@@ -787,6 +938,18 @@ def build(data):
         },
         "name": "tabs",
     })
+
+    items.append(group_item("grp-paths", "paths", [
+        text_item(
+            "## Compare upgrade paths\n\n"
+            "The same retiring resources are assessed against **independent V5 and V6 targets**. "
+            "No suitable catalogue match means manual selection, not a fallback to another generation. "
+            "These panels distinguish observed configuration from prerequisites and **unverified guest readiness**. "
+            "They do not resize a VM or certify a migration. Export either grid for the full evidence columns.",
+            "paths-intro"),
+        upgrade_path_panel(5, path_lookups[5]),
+        upgrade_path_panel(6, path_lookups[6]),
+    ]))
 
     # ---------------- TAB 1: Overview ----------------
     ov = []

@@ -25,14 +25,19 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def test_shared_parameters_preserve_complete_lookup(self):
         lookups = builder.lookup_values(self.workbook)
         sku_map, _, _, regions, region_ids = builder.build_lookups(self.data)
-        for name, value in zip(builder.LOOKUP_PARAMETERS, (sku_map, regions, region_ids)):
+        expected = dict(zip(builder.BASE_LOOKUP_PARAMETERS, (sku_map, regions, region_ids)))
+        for generation in (5, 6):
+            path = builder.build_lookups(self.data, path_generation=generation)
+            expected.update(zip(builder.PATH_LOOKUP_PARAMETERS[generation],
+                                (path[0], path[3], path[4])))
+        for name, value in expected.items():
             self.assertEqual(lookups[name], builder.kql_bag(value))
         parameters = [
             p for item in self.workbook["items"] if item.get("type") == 9
             for p in item["content"]["parameters"]
             if p["name"] in builder.LOOKUP_PARAMETERS
         ]
-        self.assertEqual(len(parameters), 3)
+        self.assertEqual(len(parameters), 9)
         for parameter in parameters:
             self.assertEqual(parameter["type"], 1)
             self.assertTrue(parameter["isHiddenWhenLocked"])
@@ -44,18 +49,85 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 15)
+        self.assertEqual(len(queries), 17)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
             if name == "about-allsizes":
                 self.assertEqual(expanded, query)
+            elif name.startswith("path-v"):
+                generation = int(name[6])
+                lookup = builder.build_lookups(self.data, path_generation=generation)
+                expected = builder.base_query(lookup[0], lookup[3], lookup[4], include_optional=False)
+                self.assertTrue(expanded.startswith(expected), name)
             else:
                 self.assertTrue(expanded.startswith(original), name)
-                for parameter in builder.LOOKUP_PARAMETERS:
-                    self.assertNotIn("{" + parameter + "}", expanded)
+            for parameter in builder.LOOKUP_PARAMETERS:
+                self.assertNotIn("{" + parameter + "}", expanded)
 
     def test_structure_is_valid(self):
         self.assertEqual(structure_check(self.workbook), [])
+
+    def test_upgrade_paths_are_two_half_width_panels_in_one_tab(self):
+        group = next(i for i in self.workbook["items"] if i["name"] == "grp-paths")
+        self.assertEqual(group["conditionalVisibility"]["value"], "paths")
+        panels = [i for i in group["content"]["items"] if i["type"] == 12]
+        self.assertEqual([p["name"] for p in panels], ["path-v5-panel", "path-v6-panel"])
+        self.assertEqual([p["customWidth"] for p in panels], ["50", "50"])
+        for panel in panels:
+            self.assertEqual(len(panel["content"]["items"]), 3)
+            query = panel["content"]["items"][1]["content"]["query"]
+            self.assertIn("ConversionOsCheck", query)
+            self.assertIn("ConversionEncryptionCheck", query)
+            self.assertIn("Guest BitLocker/ADE state unverified", query)
+            self.assertIn("Manual selection required", query)
+            self.assertIn("Custom/gallery image - verify guest drivers", query)
+            self.assertNotIn("| project ReadinessScore", query)
+
+    def test_path_targets_and_prerequisites_are_independent(self):
+        for generation, target in ((5, "Standard_D2ds_v5"), (6, "Standard_D2ads_v6")):
+            lookup = builder.build_lookups(self.data, path_generation=generation)[0]
+            self.assertNotIn("Standard_D2s_v5", lookup)
+            for source in ("Standard_DS1_v2", "Standard_D2s_v3"):
+                fields = lookup[source].split("|")
+                self.assertEqual(fields[3], target)
+                warnings = fields[9].split(",")
+                self.assertEqual("g" in warnings, generation == 6)
+                self.assertEqual("n" in warnings, generation == 6)
+                self.assertIn("h", warnings)
+                if generation == 6:
+                    self.assertIn("l", warnings)
+
+    def test_path_without_generation_match_does_not_fall_back(self):
+        record = copy.deepcopy(next(r for r in self.data["skus"]
+                                    if r["sku"] == "Standard_D2s_v3"))
+        for generation in (5, 6):
+            with self.subTest(generation=generation):
+                record["targets"] = [t for t in record["targets"]
+                                     if not t["sku"].endswith(f"_v{generation}")]
+                target, memory_target, codes = builder.select_path_target(record, generation)
+                self.assertEqual(target, {})
+                self.assertEqual(memory_target, {})
+                self.assertEqual(codes, {"path_target_unavailable"})
+
+    def test_v6_unknown_temp_capacity_is_flagged_not_assumed(self):
+        record = copy.deepcopy(next(r for r in self.data["skus"]
+                                    if r["sku"] == "Standard_D2s_v3"))
+        target, _, codes = builder.select_path_target(record, 6)
+        self.assertTrue(target["has_temp_disk"])
+        self.assertIsNone(target["temp_disk_gb"])
+        self.assertIn("target_local_disk_capacity_unverified", codes)
+        for candidate in record["targets"]:
+            if candidate["sku"].endswith("_v6"):
+                candidate["temp_disk_gb"] = 1
+        target, _, codes = builder.select_path_target(record, 6)
+        self.assertEqual(target, {})
+
+    def test_nested_upgrade_queries_must_be_subscription_scoped(self):
+        workbook = copy.deepcopy(self.workbook)
+        group = next(i for i in workbook["items"] if i["name"] == "grp-paths")
+        panel = next(i for i in group["content"]["items"] if i["name"] == "path-v5-panel")
+        panel["content"]["items"][1]["content"]["crossComponentResources"] = []
+        self.assertIn("path-v5-grid: ARG query not scoped to {Subscriptions}", structure_check(workbook))
 
     def test_lab_retirement_targets_prefer_v5_and_recalculate_warnings(self):
         sku_map, _, _, _, _ = builder.build_lookups(self.data)
@@ -139,7 +211,8 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def test_missing_shared_parameter_is_rejected(self):
         workbook = copy.deepcopy(self.workbook)
         item = next(i for i in workbook["items"] if i["name"] == "lookup-parameters")
-        item["content"]["parameters"].pop()
+        item["content"]["parameters"] = [p for p in item["content"]["parameters"]
+                                         if p["name"] != "RegionIdMap"]
         self.assertIn("missing shared lookup RegionIdMap", structure_check(workbook))
 
     def test_oversized_workbook_cannot_generate_deployment_template(self):

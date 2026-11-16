@@ -32,6 +32,10 @@ DESCRIPTIONS = {
     "imp-grid": ("Impacted resources", "Every affected VM and scale set with region, "
                  "actual generation, recommended target, target region availability, "
                  "readiness score and named blockers."),
+    "path-v5-grid": ("Upgrade paths", "Left-hand V5 panel: independent v5 target, "
+                     "target-specific prerequisites, OS/encryption/image signals and explicit unknowns."),
+    "path-v6-grid": ("Upgrade paths", "Right-hand V6 panel: independent v6 target, "
+                     "conversion/NVMe prerequisites, OS/encryption/image signals and explicit unknowns."),
     "map-grid": ("Target mapping", "One row per affected size: current spec, "
                  "recommended target, memory-preserving alternative and retirement date."),
     "map-detail": ("Target mapping", "Alternate targets, size considerations, series "
