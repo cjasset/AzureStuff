@@ -839,9 +839,66 @@
         "groupType": "editable",
         "items": [
           {
+            "type": 9,
+            "name": "quota-parameters",
+            "content": {
+              "version": "KqlParameterItem/1.0",
+              "style": "pills",
+              "parameters": [
+                {
+                  "name": "QuotaScope",
+                  "type": 2,
+                  "isRequired": true,
+                  "label": "Planning scope",
+                  "jsonData": "[{\"value\": \"selected\", \"label\": \"Selected subscriptions\"}, {\"value\": \"tenant\", \"label\": \"Tenant - all readable subscriptions\"}]",
+                  "value": "selected",
+                  "version": "KqlParameterItem/1.0"
+                },
+                {
+                  "name": "QuotaMigrationMode",
+                  "type": 2,
+                  "isRequired": true,
+                  "label": "Migration approach",
+                  "jsonData": "[{\"value\": \"sidebyside\", \"label\": \"Side-by-side (keep sources)\"}, {\"value\": \"inplace\", \"label\": \"In-place (validate allocation)\"}]",
+                  "value": "sidebyside",
+                  "version": "KqlParameterItem/1.0"
+                },
+                {
+                  "name": "QuotaDetails",
+                  "type": 2,
+                  "isRequired": true,
+                  "label": "Show detail",
+                  "jsonData": "[{\"value\": \"none\", \"label\": \"Summary only\"}, {\"value\": \"migration\", \"label\": \"Migration breakdown\"}, {\"value\": \"checks\", \"label\": \"Quota checks and shortfalls\"}, {\"value\": \"headroom\", \"label\": \"Tenant headroom / quota group discussion\"}]",
+                  "value": "none",
+                  "version": "KqlParameterItem/1.0"
+                },
+                {
+                  "name": "QuotaAllSubscriptions",
+                  "type": 6,
+                  "isRequired": true,
+                  "multiSelect": true,
+                  "isHiddenWhenLocked": true,
+                  "quote": "'",
+                  "delimiter": ",",
+                  "typeSettings": {
+                    "additionalResourceOptions": [
+                      "value::all"
+                    ],
+                    "includeAll": true,
+                    "showDefault": false
+                  },
+                  "value": [
+                    "value::all"
+                  ],
+                  "version": "KqlParameterItem/1.0"
+                }
+              ]
+            }
+          },
+          {
             "type": 1,
             "content": {
-              "json": "## Capacity / quota planning\n\nDemand covers all retirement/EOL VM and VMSS instances in the selected subscriptions, independent of Lifecycle status. It uses the default recommended target and current region; it is not a right-sizing or cross-region relocation plan. Flexible scale sets are counted once through the model capacity, not again through member VMs.\n\n**Select a demand row** below to retrieve live quota for its subscription/region/family. The family names come from a captured public Compute SKU snapshot, not inferred series names. Missing metadata remains explicit. Core charges use captured SKU **vCPUs**, not guest-visible vCPUsAvailable for constrained-core sizes. Spot workloads require separate Spot quota and make this dedicated-quota estimate unresolved.\n\n**Side-by-side:** additional cores equal the full destination fleet, with sources retained. **In-place:** regional increase is the sum of positive per-VM core deltas; destination-family demand is the full target size when families change, otherwise the positive delta. No credit is taken for future deletions or shrinking other VMs. These are conservative all-at-once estimates, not a wave schedule. Deallocated inventory is included; allocate/rebuild such VMs using the side-by-side requirement rather than assuming an in-place quota credit. Deallocated or unknown source power states make the in-place check Unknown, including scale-set models without instance allocation evidence.\n\n**Quota is not physical capacity.** Check live SKU/zone restrictions, ARM validation, policy, cluster constraints and allocation independently. A passing quota check does not reserve capacity or approve a migration."
+              "json": "## Capacity / quota planning\n\nA compact total plus one row per subscription. Change **Planning scope** to compare selected subscriptions with all subscriptions you can read in the current tenant. The tenant view cannot include subscriptions hidden by permissions. Other workbook tabs retain their original scope.\n\n| Column | Key |\n| --- | --- |\n| Current cores | Captured quota-vCPUs of retirement/EOL sources, not all workloads in the subscription. VMSS capacity is counted once; deallocated inventory is included, not asserted to consume quota today. |\n| Target cores | Quota-vCPUs needed by their default V5-first targets in the current regions. |\n| Delta (+/-) | Target minus current: positive means growth, negative means reduction. **Not** the quota request size. |\n| Quota status | **Red: Insufficient quota** if any region or destination family is short. **Orange: Unknown** for missing quota/metadata or unverified in-place allocation. Green means quota only, not migration approval. |\n\n**Every affected subscription/region/family is checked automatically**, using indexed Compute `QuotaResources` usage and limits. Both regional and family checks must pass; spare quota in another subscription or region never cancels a shortfall. Indexing is eventually consistent: refresh and recheck with Azure Quotas/CLI before migration. Missing records are Unknown, not unlimited.\n\n**Migration approach:** side-by-side requires the full target cores as additional quota. In-place uses positive regional deltas, but cross-family moves still need the full target-family cores. No negative credits from shrinking other VMs. Spot and deallocated/unknown in-place allocations stay Unknown. The Delta column does not change with this choice.\n\n**Show detail** opens one optional table at a time. Quota checks explains **AdditionalCores**, **Available** (limit minus all current usage), and **Shortfall** (additional minus available, floored at zero). Blank shortfall means Unknown. Regional demand includes all target families. **Tenant headroom** shows unused quota now in readable subscriptions for relevant regions/families, capped by regional headroom. It is not surplus after their planned migrations or a shared pool: verify quota-group membership, eligibility, limits and approvals before any reallocation. This workbook neither inspects quota-group eligibility nor moves quota.\n\n**Quota is not physical capacity.** SKU/zone restrictions, policy, boot/driver compatibility and actual allocation still require validation. Targets use captured SKU `vCPUs`, not constrained `vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand."
             },
             "name": "quota-intro",
             "styleSettings": {
@@ -853,122 +910,446 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// Once an existing RI expires the workload bills at pay-as-you-go, even when\n// the reservation is set to auto-renew. Public source: Azure update 560948.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'Not applicable',\n        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',\n        'Expires - no renewal available')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Low - in-place resize',\n        ReadinessScore >= 60, 'Medium - validate then resize',\n        ReadinessScore >= 35, 'High - prerequisites required',\n        'Very high - re-architecture')\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),\n         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),\n         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),\n         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)\n| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)\n        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0\n        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,\n         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))\n| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,\n        RegionalIncrement, TargetCores)\n| summarize Resources = count(), Instances = sum(Instances),\n        CurrentCores = sum(SourceCores), SideBySideAdditionalCores = sum(TargetCores),\n        InPlaceAdditionalFamilyCores = sum(FamilyIncrement),\n        InPlaceAdditionalRegionalCores = sum(RegionalIncrement),\n        UnresolvedResources = countif(Unresolved),\n        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),\n        TargetSizes = strcat_array(make_set(RecommendedTarget, 100), ', ')\n    by SubscriptionId, Region, TargetQuotaFamily\n| extend TargetQuotaFamily = iff(isempty(TargetQuotaFamily), 'Unknown', TargetQuotaFamily),\n         EstimateStatus = iff(UnresolvedResources > 0, 'Unknown - incomplete metadata', 'Estimated - validate live quota')\n| order by SubscriptionId asc, Region asc, TargetQuotaFamily asc",
+              "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// Once an existing RI expires the workload bills at pay-as-you-go, even when\n// the reservation is set to auto-renew. Public source: Azure update 560948.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'Not applicable',\n        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',\n        'Expires - no renewal available')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Low - in-place resize',\n        ReadinessScore >= 60, 'Medium - validate then resize',\n        ReadinessScore >= 35, 'High - prerequisites required',\n        'Very high - re-architecture')\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| where '{QuotaScope}' == 'tenant' or SubscriptionId in~ ({Subscriptions})\n    or strcat('/subscriptions/', SubscriptionId) in~ ({Subscriptions})\n    or 'value::all' in~ ({Subscriptions})\n| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),\n         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),\n         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),\n         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)\n| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)\n        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0\n        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,\n         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))\n| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,\n        RegionalIncrement, TargetCores)\n| extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))\n| mv-expand Metric\n| extend Metric = tolower(tostring(Metric)),\n         InPlaceAdditional = iff(Metric == 'cores', RegionalIncrement, FamilyIncrement)\n| summarize CurrentCores = sum(SourceCores), TargetCores = sum(TargetCores),\n        CurrentUnknown = countif(isnull(SourceCores) or SourceCores < 0),\n        TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),\n        SideBySideAdditionalCores = sum(TargetCores),\n        InPlaceAdditionalCores = sum(InPlaceAdditional),\n        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),\n        UnresolvedResources = countif(Unresolved) by SubscriptionId, Region, Metric\n| join kind=leftouter (\nQuotaResources\n| where type =~ 'microsoft.compute/locations/usages'\n| mv-expand Quota = properties.value limit 2000\n| project SubscriptionId = tolower(subscriptionId), Region = tolower(location),\n          Metric = tolower(tostring(Quota.name.value)),\n          QuotaLimit = tolong(Quota['limit']), QuotaUsage = tolong(Quota.currentValue)\n| summarize MetricRecords = count(), Limit = max(QuotaLimit), Usage = max(QuotaUsage)\n    by SubscriptionId, Region, Metric\n) on SubscriptionId, Region, Metric\n| extend Available = Limit - Usage,\n         QuotaUnknown = isnull(MetricRecords) or MetricRecords != 1\n             or isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0\n| extend SideBySideShortfall = iff(QuotaUnknown, tolong(''),\n             iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),\n         InPlaceShortfall = iff(QuotaUnknown or InPlaceUnverifiedResources > 0, tolong(''),\n             iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))\n| extend SideBySideStatus = case(QuotaUnknown,\n            'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),\n         InPlaceStatus = case(QuotaUnknown,\n            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',\n            InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only')\n| extend AdditionalCores = iff('{QuotaMigrationMode}' == 'inplace', InPlaceAdditionalCores, SideBySideAdditionalCores),\n         Shortfall = iff('{QuotaMigrationMode}' == 'inplace', InPlaceShortfall, SideBySideShortfall),\n         SelectedStatus = iff('{QuotaMigrationMode}' == 'inplace', InPlaceStatus, SideBySideStatus)\n| extend QuotaStatus = case(SelectedStatus startswith 'Unknown', SelectedStatus,\n              Shortfall > 0, 'Insufficient quota', 'Sufficient - quota only'),\n         Delta = iff(CurrentUnknown > 0 or TargetUnknown > 0, tolong(''), TargetCores - CurrentCores),\n         CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),\n         TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),\n         QuotaCheck = iff(Metric == 'cores', 'Regional total', Metric),\n         DemandEvaluatedAt = now()\n| project SubscriptionId, Region, Metric, Limit, Usage, Available,\n          CurrentCores, TargetCores, Delta, CurrentUnknown, TargetUnknown,\n          AdditionalCores, Shortfall, QuotaStatus, QuotaCheck,\n          SideBySideAdditionalCores, SideBySideShortfall, SideBySideStatus,\n          InPlaceAdditionalCores, InPlaceShortfall, InPlaceStatus, InPlaceUnverifiedResources, UnresolvedResources, DemandEvaluatedAt\n| order by SubscriptionId asc, Region asc, Metric asc\n| extend SummaryScopes = pack_array(SubscriptionId, '__total__')\n| mv-expand SummaryScopes\n| summarize CurrentCores = sumif(CurrentCores, Metric == 'cores'),\n        TargetCores = sumif(TargetCores, Metric == 'cores'),\n        CurrentUnknown = sumif(CurrentUnknown, Metric == 'cores'),\n        TargetUnknown = sumif(TargetUnknown, Metric == 'cores'),\n        FailedChecks = countif(QuotaStatus startswith 'Insufficient'),\n        UnknownChecks = countif(QuotaStatus startswith 'Unknown')\n    by SubscriptionId = tostring(SummaryScopes)\n| join kind=leftouter (\n    ResourceContainers\n    | where type =~ 'microsoft.resources/subscriptions'\n    | project SubscriptionId = tolower(subscriptionId), SubscriptionName = name\n) on SubscriptionId\n| extend CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),\n         TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),\n         TotalOrder = iff(SubscriptionId == '__total__', 0, 1),\n         Scope = iff(SubscriptionId == '__total__',\n             iff('{QuotaScope}' == 'tenant', 'TENANT TOTAL (readable subscriptions)', 'SELECTED SUBSCRIPTIONS TOTAL'),\n             coalesce(SubscriptionName, SubscriptionId)),\n         QuotaStatus = case(FailedChecks > 0 and UnknownChecks > 0, 'Insufficient quota / incomplete checks',\n             FailedChecks > 0, 'Insufficient quota', UnknownChecks > 0, 'Unknown - incomplete checks', 'Sufficient - quota only')\n| order by TotalOrder asc, Scope asc\n| project Scope, ['Current cores'] = CurrentCores, ['Target cores'] = TargetCores,\n          ['Delta (+/-)'] = TargetCores - CurrentCores, ['Quota status'] = QuotaStatus,\n          SubscriptionId, FailedChecks, UnknownChecks",
               "size": 1,
               "queryType": 1,
               "resourceType": "microsoft.resourcegraph/resources",
               "crossComponentResources": [
-                "{Subscriptions}"
+                "{QuotaAllSubscriptions}"
               ],
               "visualization": "table",
-              "title": "Migration core demand by subscription, region and target family",
+              "title": "Core migration plan: total and per subscription",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Scope",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "38ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Current cores",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "14ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Target cores",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "14ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Delta (+/-)",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "12ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Quota status",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "Insufficient",
+                          "representation": "red",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "Unknown",
+                          "representation": "orange",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "representation": "green",
+                          "text": "{0}{1}"
+                        }
+                      ],
+                      "customColumnWidthSetting": "34ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "SubscriptionId",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "FailedChecks",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "UnknownChecks",
+                    "formatter": 5
+                  }
+                ],
+                "rowLimit": 10
+              },
               "showExportToExcel": true,
-              "exportToExcelOptions": "all",
-              "exportedParameters": [
-                {
-                  "fieldName": "SubscriptionId",
-                  "parameterName": "QuotaSubscription"
-                },
-                {
-                  "fieldName": "Region",
-                  "parameterName": "QuotaRegion"
-                },
-                {
-                  "fieldName": "TargetQuotaFamily",
-                  "parameterName": "QuotaFamily"
-                }
-              ]
+              "exportToExcelOptions": "all"
             },
-            "name": "quota-demand"
+            "name": "quota-summary"
           },
           {
-            "type": 12,
-            "name": "quota-live",
+            "type": 3,
             "content": {
-              "version": "NotebookGroup/1.0",
-              "groupType": "editable",
-              "items": [
-                {
-                  "type": 9,
-                  "name": "quota-live-parameters",
-                  "content": {
-                    "version": "KqlParameterItem/1.0",
-                    "style": "pills",
-                    "parameters": [
-                      {
-                        "version": "KqlParameterItem/1.0",
-                        "name": "RegionalQuotaLimit",
-                        "type": 1,
-                        "isRequired": true,
-                        "isHiddenWhenLocked": true,
-                        "queryType": 12,
-                        "query": "{\"version\":\"ARMEndpoint/1.0\",\"data\":null,\"headers\":[],\"method\":\"GET\",\"path\":\"/subscriptions/{QuotaSubscription}/providers/Microsoft.Compute/locations/{QuotaRegion}/usages?api-version=2024-07-01\",\"urlParams\":[],\"batchDisabled\":false,\"transformers\":[{\"type\":\"jsonpath\",\"settings\":{\"tablePath\":\"$.value[?(@.name.value=='cores')]\",\"columns\":[{\"path\":\"$.limit\",\"columnid\":\"value\",\"columnType\":\"long\"}]}}]}"
-                      },
-                      {
-                        "version": "KqlParameterItem/1.0",
-                        "name": "RegionalQuotaUsage",
-                        "type": 1,
-                        "isRequired": true,
-                        "isHiddenWhenLocked": true,
-                        "queryType": 12,
-                        "query": "{\"version\":\"ARMEndpoint/1.0\",\"data\":null,\"headers\":[],\"method\":\"GET\",\"path\":\"/subscriptions/{QuotaSubscription}/providers/Microsoft.Compute/locations/{QuotaRegion}/usages?api-version=2024-07-01\",\"urlParams\":[],\"batchDisabled\":false,\"transformers\":[{\"type\":\"jsonpath\",\"settings\":{\"tablePath\":\"$.value[?(@.name.value=='cores')]\",\"columns\":[{\"path\":\"$.currentValue\",\"columnid\":\"value\",\"columnType\":\"long\"}]}}]}"
-                      },
-                      {
-                        "version": "KqlParameterItem/1.0",
-                        "name": "FamilyQuotaLimit",
-                        "type": 1,
-                        "isRequired": true,
-                        "isHiddenWhenLocked": true,
-                        "queryType": 12,
-                        "query": "{\"version\":\"ARMEndpoint/1.0\",\"data\":null,\"headers\":[],\"method\":\"GET\",\"path\":\"/subscriptions/{QuotaSubscription}/providers/Microsoft.Compute/locations/{QuotaRegion}/usages?api-version=2024-07-01\",\"urlParams\":[],\"batchDisabled\":false,\"transformers\":[{\"type\":\"jsonpath\",\"settings\":{\"tablePath\":\"$.value[?(@.name.value=='{QuotaFamily}')]\",\"columns\":[{\"path\":\"$.limit\",\"columnid\":\"value\",\"columnType\":\"long\"}]}}]}"
-                      },
-                      {
-                        "version": "KqlParameterItem/1.0",
-                        "name": "FamilyQuotaUsage",
-                        "type": 1,
-                        "isRequired": true,
-                        "isHiddenWhenLocked": true,
-                        "queryType": 12,
-                        "query": "{\"version\":\"ARMEndpoint/1.0\",\"data\":null,\"headers\":[],\"method\":\"GET\",\"path\":\"/subscriptions/{QuotaSubscription}/providers/Microsoft.Compute/locations/{QuotaRegion}/usages?api-version=2024-07-01\",\"urlParams\":[],\"batchDisabled\":false,\"transformers\":[{\"type\":\"jsonpath\",\"settings\":{\"tablePath\":\"$.value[?(@.name.value=='{QuotaFamily}')]\",\"columns\":[{\"path\":\"$.currentValue\",\"columnid\":\"value\",\"columnType\":\"long\"}]}}]}"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "type": 1,
-                  "content": {
-                    "json": "### Live quota comparison: {QuotaSubscription} / {QuotaRegion} / {QuotaFamily}\n\nRefresh this workbook after selecting a demand row and after any quota/usage change. Both regional and family checks must pass. Quota API errors, absent metrics and incomplete SKU metadata are **Unknown**, never unlimited or a pass. The live calls use your portal identity and require Compute usage-read permission."
+              "version": "KqlItem/1.0",
+              "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// Once an existing RI expires the workload bills at pay-as-you-go, even when\n// the reservation is set to auto-renew. Public source: Azure update 560948.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'Not applicable',\n        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',\n        'Expires - no renewal available')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Low - in-place resize',\n        ReadinessScore >= 60, 'Medium - validate then resize',\n        ReadinessScore >= 35, 'High - prerequisites required',\n        'Very high - re-architecture')\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| where '{QuotaScope}' == 'tenant' or SubscriptionId in~ ({Subscriptions})\n    or strcat('/subscriptions/', SubscriptionId) in~ ({Subscriptions})\n    or 'value::all' in~ ({Subscriptions})\n| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),\n         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),\n         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),\n         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)\n| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)\n        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0\n        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,\n         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))\n| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,\n        RegionalIncrement, TargetCores)\n| summarize Resources = count(), Instances = sum(Instances),\n        CurrentCores = sum(SourceCores), SideBySideAdditionalCores = sum(TargetCores),\n        CurrentUnknown = countif(isnull(SourceCores) or SourceCores < 0),\n        TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),\n        InPlaceAdditionalFamilyCores = sum(FamilyIncrement),\n        InPlaceAdditionalRegionalCores = sum(RegionalIncrement),\n        UnresolvedResources = countif(Unresolved),\n        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),\n        TargetSizes = strcat_array(make_set(RecommendedTarget, 100), ', ')\n    by SubscriptionId, Region, TargetQuotaFamily\n| extend TargetQuotaFamily = iff(isempty(TargetQuotaFamily), 'Unknown', TargetQuotaFamily),\n         TargetCores = iff(TargetUnknown > 0, tolong(''), SideBySideAdditionalCores),\n         CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),\n         EstimateStatus = iff(UnresolvedResources > 0, 'Unknown - incomplete metadata', 'Estimated - validate live quota')\n| extend Delta = TargetCores - CurrentCores\n| order by SubscriptionId asc, Region asc, TargetQuotaFamily asc",
+              "size": 1,
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{QuotaAllSubscriptions}"
+              ],
+              "visualization": "table",
+              "title": "Migration breakdown: subscription, region and target family",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "SubscriptionId",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "30ch"
+                    }
                   },
-                  "name": "quota-live-intro",
-                  "styleSettings": {
-                    "margin": "0",
-                    "padding": "0"
-                  }
-                },
-                {
-                  "type": 3,
-                  "content": {
-                    "version": "KqlItem/1.0",
-                    "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// Once an existing RI expires the workload bills at pay-as-you-go, even when\n// the reservation is set to auto-renew. Public source: Azure update 560948.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'Not applicable',\n        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',\n        'Expires - no renewal available')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Low - in-place resize',\n        ReadinessScore >= 60, 'Medium - validate then resize',\n        ReadinessScore >= 35, 'High - prerequisites required',\n        'Very high - re-architecture')\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),\n         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),\n         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),\n         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)\n| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)\n        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0\n        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,\n         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))\n| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,\n        RegionalIncrement, TargetCores)\n| where SubscriptionId =~ '{QuotaSubscription}' and Region =~ '{QuotaRegion}'\n| extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))\n| mv-expand Metric\n| extend Metric = tostring(Metric),\n         InPlaceAdditional = iff(Metric == 'cores', RegionalIncrement, FamilyIncrement)\n| summarize SideBySideAdditionalCores = sum(TargetCores),\n        InPlaceAdditionalCores = sum(InPlaceAdditional),\n        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),\n        UnresolvedResources = countif(Unresolved) by Metric\n| where Metric == 'cores' or Metric =~ '{QuotaFamily}'\n| extend Limit = iff(Metric == 'cores', tolong('{RegionalQuotaLimit}'), tolong('{FamilyQuotaLimit}')),\n         Usage = iff(Metric == 'cores', tolong('{RegionalQuotaUsage}'), tolong('{FamilyQuotaUsage}'))\n| extend Available = Limit - Usage,\n         SideBySideShortfall = iff(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0, tolong(''),\n             iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),\n         InPlaceShortfall = iff(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0 or InPlaceUnverifiedResources > 0, tolong(''),\n             iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))\n| extend SideBySideStatus = case(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0,\n            'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),\n         InPlaceStatus = case(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0,\n            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',\n            InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),\n         SubscriptionId = '{QuotaSubscription}', Region = '{QuotaRegion}',\n         DemandEvaluatedAt = now()\n| project SubscriptionId, Region, Metric, Limit, Usage, Available,\n          SideBySideAdditionalCores, SideBySideShortfall, SideBySideStatus,\n          InPlaceAdditionalCores, InPlaceShortfall, InPlaceStatus, InPlaceUnverifiedResources, UnresolvedResources, DemandEvaluatedAt\n| order by Metric asc",
-                    "size": 1,
-                    "queryType": 1,
-                    "resourceType": "microsoft.resourcegraph/resources",
-                    "crossComponentResources": [
-                      "{Subscriptions}"
-                    ],
-                    "visualization": "table",
-                    "title": "Regional and selected-family headroom versus migration demand",
-                    "showExportToExcel": true,
-                    "exportToExcelOptions": "all"
+                  {
+                    "columnMatch": "Region",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "15ch"
+                    }
                   },
-                  "name": "quota-check"
-                }
-              ]
+                  {
+                    "columnMatch": "TargetQuotaFamily",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "28ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "CurrentCores",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "12ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "TargetCores",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "12ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Delta",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "10ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Resources",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "Instances",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "SideBySideAdditionalCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceAdditionalFamilyCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceAdditionalRegionalCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "UnresolvedResources",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceUnverifiedResources",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "TargetSizes",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "EstimateStatus",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "CurrentUnknown",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "TargetUnknown",
+                    "formatter": 5
+                  }
+                ],
+                "rowLimit": 10
+              },
+              "showExportToExcel": true,
+              "exportToExcelOptions": "all"
             },
+            "name": "quota-demand",
             "conditionalVisibility": {
-              "parameterName": "QuotaSubscription",
-              "comparison": "isNotEqualTo",
-              "value": ""
+              "parameterName": "QuotaDetails",
+              "comparison": "isEqualTo",
+              "value": "migration"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// Once an existing RI expires the workload bills at pay-as-you-go, even when\n// the reservation is set to auto-renew. Public source: Azure update 560948.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'Not applicable',\n        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',\n        'Expires - no renewal available')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Low - in-place resize',\n        ReadinessScore >= 60, 'Medium - validate then resize',\n        ReadinessScore >= 35, 'High - prerequisites required',\n        'Very high - re-architecture')\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| where '{QuotaScope}' == 'tenant' or SubscriptionId in~ ({Subscriptions})\n    or strcat('/subscriptions/', SubscriptionId) in~ ({Subscriptions})\n    or 'value::all' in~ ({Subscriptions})\n| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),\n         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),\n         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),\n         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)\n| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)\n        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0\n        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,\n         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))\n| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,\n        RegionalIncrement, TargetCores)\n| extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))\n| mv-expand Metric\n| extend Metric = tolower(tostring(Metric)),\n         InPlaceAdditional = iff(Metric == 'cores', RegionalIncrement, FamilyIncrement)\n| summarize CurrentCores = sum(SourceCores), TargetCores = sum(TargetCores),\n        CurrentUnknown = countif(isnull(SourceCores) or SourceCores < 0),\n        TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),\n        SideBySideAdditionalCores = sum(TargetCores),\n        InPlaceAdditionalCores = sum(InPlaceAdditional),\n        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),\n        UnresolvedResources = countif(Unresolved) by SubscriptionId, Region, Metric\n| join kind=leftouter (\nQuotaResources\n| where type =~ 'microsoft.compute/locations/usages'\n| mv-expand Quota = properties.value limit 2000\n| project SubscriptionId = tolower(subscriptionId), Region = tolower(location),\n          Metric = tolower(tostring(Quota.name.value)),\n          QuotaLimit = tolong(Quota['limit']), QuotaUsage = tolong(Quota.currentValue)\n| summarize MetricRecords = count(), Limit = max(QuotaLimit), Usage = max(QuotaUsage)\n    by SubscriptionId, Region, Metric\n) on SubscriptionId, Region, Metric\n| extend Available = Limit - Usage,\n         QuotaUnknown = isnull(MetricRecords) or MetricRecords != 1\n             or isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0\n| extend SideBySideShortfall = iff(QuotaUnknown, tolong(''),\n             iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),\n         InPlaceShortfall = iff(QuotaUnknown or InPlaceUnverifiedResources > 0, tolong(''),\n             iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))\n| extend SideBySideStatus = case(QuotaUnknown,\n            'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),\n         InPlaceStatus = case(QuotaUnknown,\n            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',\n            InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only')\n| extend AdditionalCores = iff('{QuotaMigrationMode}' == 'inplace', InPlaceAdditionalCores, SideBySideAdditionalCores),\n         Shortfall = iff('{QuotaMigrationMode}' == 'inplace', InPlaceShortfall, SideBySideShortfall),\n         SelectedStatus = iff('{QuotaMigrationMode}' == 'inplace', InPlaceStatus, SideBySideStatus)\n| extend QuotaStatus = case(SelectedStatus startswith 'Unknown', SelectedStatus,\n              Shortfall > 0, 'Insufficient quota', 'Sufficient - quota only'),\n         Delta = iff(CurrentUnknown > 0 or TargetUnknown > 0, tolong(''), TargetCores - CurrentCores),\n         CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),\n         TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),\n         QuotaCheck = iff(Metric == 'cores', 'Regional total', Metric),\n         DemandEvaluatedAt = now()\n| project SubscriptionId, Region, Metric, Limit, Usage, Available,\n          CurrentCores, TargetCores, Delta, CurrentUnknown, TargetUnknown,\n          AdditionalCores, Shortfall, QuotaStatus, QuotaCheck,\n          SideBySideAdditionalCores, SideBySideShortfall, SideBySideStatus,\n          InPlaceAdditionalCores, InPlaceShortfall, InPlaceStatus, InPlaceUnverifiedResources, UnresolvedResources, DemandEvaluatedAt\n| order by SubscriptionId asc, Region asc, Metric asc",
+              "size": 1,
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{QuotaAllSubscriptions}"
+              ],
+              "visualization": "table",
+              "title": "Automatic quota checks: every affected subscription / region / family",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "SubscriptionId",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "30ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Region",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "15ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "QuotaCheck",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "28ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "AdditionalCores",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "15ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Available",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "15ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Shortfall",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": ">",
+                          "thresholdValue": "0",
+                          "representation": "red",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "representation": "gray",
+                          "text": "{0}{1}"
+                        }
+                      ],
+                      "customColumnWidthSetting": "12ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "QuotaStatus",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "Insufficient",
+                          "representation": "red",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "Unknown",
+                          "representation": "orange",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "representation": "green",
+                          "text": "{0}{1}"
+                        }
+                      ],
+                      "customColumnWidthSetting": "32ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Metric",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "Limit",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "Usage",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "CurrentCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "TargetCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "Delta",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "CurrentUnknown",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "TargetUnknown",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "SideBySideAdditionalCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "SideBySideShortfall",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "SideBySideStatus",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceAdditionalCores",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceShortfall",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceStatus",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "InPlaceUnverifiedResources",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "UnresolvedResources",
+                    "formatter": 5
+                  },
+                  {
+                    "columnMatch": "DemandEvaluatedAt",
+                    "formatter": 5
+                  }
+                ],
+                "rowLimit": 10
+              },
+              "showExportToExcel": true,
+              "exportToExcelOptions": "all"
+            },
+            "name": "quota-check",
+            "conditionalVisibility": {
+              "parameterName": "QuotaDetails",
+              "comparison": "isEqualTo",
+              "value": "checks"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// Once an existing RI expires the workload bills at pay-as-you-go, even when\n// the reservation is set to auto-renew. Public source: Azure update 560948.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'Not applicable',\n        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',\n        'Expires - no renewal available')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Low - in-place resize',\n        ReadinessScore >= 60, 'Medium - validate then resize',\n        ReadinessScore >= 35, 'High - prerequisites required',\n        'Very high - re-architecture')\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| where '{QuotaScope}' == 'tenant' or SubscriptionId in~ ({Subscriptions})\n    or strcat('/subscriptions/', SubscriptionId) in~ ({Subscriptions})\n    or 'value::all' in~ ({Subscriptions})\n| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),\n         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),\n         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),\n         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)\n| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)\n        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0\n        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,\n         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))\n| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,\n        RegionalIncrement, TargetCores)\n| where isnotempty(TargetQuotaFamily)\n| summarize by Region, TargetQuotaFamily\n| join kind=inner (\nQuotaResources\n| where type =~ 'microsoft.compute/locations/usages'\n| mv-expand Quota = properties.value limit 2000\n| project SubscriptionId = tolower(subscriptionId), Region = tolower(location),\n          Metric = tolower(tostring(Quota.name.value)),\n          QuotaLimit = tolong(Quota['limit']), QuotaUsage = tolong(Quota.currentValue)\n| summarize MetricRecords = count(), Limit = max(QuotaLimit), Usage = max(QuotaUsage)\n    by SubscriptionId, Region, Metric\n| summarize Limits = make_bag(pack(Metric, Limit)), Usages = make_bag(pack(Metric, Usage)),\n        Counts = make_bag(pack(Metric, MetricRecords)) by SubscriptionId, Region\n) on Region\n| extend Family = tolower(TargetQuotaFamily)\n| extend FamilyAvailable = tolong(Limits[Family]) - tolong(Usages[Family]),\n         RegionalAvailable = tolong(Limits['cores']) - tolong(Usages['cores']),\n         QuotaUnknown = isnull(Counts[Family]) or isnull(Counts['cores'])\n             or tolong(Counts[Family]) != 1 or tolong(Counts['cores']) != 1\n             or isnull(tolong(Limits[Family])) or isnull(tolong(Usages[Family]))\n             or isnull(tolong(Limits['cores'])) or isnull(tolong(Usages['cores']))\n             or tolong(Limits[Family]) < 0 or tolong(Usages[Family]) < 0\n             or tolong(Limits['cores']) < 0 or tolong(Usages['cores']) < 0\n| extend AvailableCores = iff(QuotaUnknown, tolong(''),\n             iff(FamilyAvailable < RegionalAvailable, FamilyAvailable, RegionalAvailable))\n| extend HeadroomStatus = case(QuotaUnknown, 'Unknown - quota missing',\n             AvailableCores <= 0, 'No unused quota', 'Potential headroom - assess quota group eligibility')\n| project SubscriptionId, Region, TargetQuotaFamily, AvailableCores, HeadroomStatus\n| order by Region asc, TargetQuotaFamily asc, AvailableCores desc",
+              "size": 1,
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{QuotaAllSubscriptions}"
+              ],
+              "visualization": "table",
+              "title": "Quota discussion leads: unused quota across readable tenant subscriptions",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "SubscriptionId",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "30ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "Region",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "15ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "TargetQuotaFamily",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "28ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "AvailableCores",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "15ch"
+                    }
+                  },
+                  {
+                    "columnMatch": "HeadroomStatus",
+                    "formatter": 0,
+                    "formatOptions": {
+                      "customColumnWidthSetting": "48ch"
+                    }
+                  }
+                ],
+                "rowLimit": 10
+              },
+              "showExportToExcel": true,
+              "exportToExcelOptions": "all"
+            },
+            "name": "quota-headroom",
+            "conditionalVisibility": {
+              "parameterName": "QuotaDetails",
+              "comparison": "isEqualTo",
+              "value": "headroom"
             }
           }
         ]

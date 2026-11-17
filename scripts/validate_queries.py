@@ -16,8 +16,9 @@ WB = os.path.join(OUT, "azure-vm-retirement-workbook.json")
 
 # Workbook parameter placeholders are not resolvable outside the portal.
 SUBSTITUTIONS = {
-    "{Subscriptions}": "",
     "{LifecycleFilter}": "RETIRE,EOL,OPTIONAL",
+    "{QuotaScope}": "selected",
+    "{QuotaMigrationMode}": "sidebyside",
 }
 
 def azure_json(arguments):
@@ -26,29 +27,6 @@ def azure_json(arguments):
     if result.returncode:
         raise RuntimeError(f"Azure CLI failed: {(result.stderr or result.stdout).strip()}")
     return json.loads(result.stdout)
-
-
-def quota_substitutions(subscription, region, family):
-    import re
-    if not re.fullmatch(r"[a-z0-9-]+", region) or not re.fullmatch(r"[A-Za-z0-9]+", family):
-        raise ValueError("Invalid quota region or Compute quota family.")
-    usage = azure_json(["rest", "--method", "get", "--url",
-                        f"https://management.azure.com/subscriptions/{subscription}/providers/"
-                        f"Microsoft.Compute/locations/{region}/usages?api-version=2024-07-01"])
-    substitutions = {
-        "{QuotaSubscription}": subscription, "{QuotaRegion}": region, "{QuotaFamily}": family,
-    }
-    for metric, prefix in (("cores", "Regional"), (family, "Family")):
-        matches = [row for row in usage["value"]
-                   if row["name"]["value"].lower() == metric.lower()]
-        if len(matches) > 1:
-            raise ValueError(f"Duplicate Compute quota metric: {metric}")
-        for field, suffix in (("limit", "Limit"), ("currentValue", "Usage")):
-            value = matches[0].get(field) if matches else None
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
-                raise ValueError(f"Non-integer quota {metric}/{field}: {value!r}")
-            substitutions[f"{{{prefix}Quota{suffix}}}"] = "null" if value is None else str(value)
-    return substitutions
 
 
 def walk(node, found):
@@ -130,8 +108,12 @@ def structure_check(wb):
     def check_scope(node):
         if isinstance(node, dict):
             c = node.get("content", {})
-            if isinstance(c, dict) and c.get("queryType") == 1 and c.get("crossComponentResources") != ["{Subscriptions}"]:
-                problems.append(f"{node.get('name')}: ARG query not scoped to {{Subscriptions}}")
+            if isinstance(c, dict) and c.get("queryType") == 1:
+                expected = ["{QuotaAllSubscriptions}"] if node.get("name", "").startswith("quota-") else ["{Subscriptions}"]
+                if c.get("crossComponentResources") != expected:
+                    problems.append(f"{node.get('name')}: ARG query not scoped to {expected[0]}")
+                if node.get("name", "").startswith("quota-") and "{QuotaScope}" not in c["query"]:
+                    problems.append(f"{node.get('name')}: missing quota planning-scope filter")
             for value in node.values():
                 check_scope(value)
         elif isinstance(node, list):
@@ -148,8 +130,8 @@ def main():
     parser.add_argument("--offline", action="store_true",
                         help="Check structure and published deployment artifacts without Azure.")
     parser.add_argument("--subscription", help="Live query scope; defaults to the current CLI subscription.")
-    parser.add_argument("--quota-region", help="Live quota region; defaults to the first demand row.")
-    parser.add_argument("--quota-family", help="Actual Compute quota family; defaults to the first demand row.")
+    parser.add_argument("--quota-scope", choices=("selected", "tenant"), default="selected")
+    parser.add_argument("--migration-mode", choices=("sidebyside", "inplace"), default="sidebyside")
     args = parser.parse_args()
     wb = json.load(open(WB, encoding="utf-8"))
 
@@ -181,20 +163,10 @@ def main():
 
     subscription = args.subscription or azure_json(["account", "show"])["id"]
     substitutions = dict(SUBSTITUTIONS)
-    demand_rows = []
+    substitutions.update({"{Subscriptions}": f"'{subscription}'", "{QuotaScope}": args.quota_scope,
+                          "{QuotaMigrationMode}": args.migration_mode})
     failures = 0
     for name, q in queries:
-        if name == "quota-check":
-            eligible = [row for row in demand_rows
-                        if row.get("TargetQuotaFamily") and row["TargetQuotaFamily"] != "Unknown"
-                        and (not args.quota_region or row["Region"] == args.quota_region)
-                        and (not args.quota_family or row["TargetQuotaFamily"] == args.quota_family)]
-            region = args.quota_region or (eligible[0]["Region"] if eligible else None)
-            family = args.quota_family or (eligible[0]["TargetQuotaFamily"] if eligible else None)
-            if not region or not family:
-                raise ValueError("No matching demand row. Supply --quota-region and --quota-family.")
-            substitutions.update(quota_substitutions(subscription, region, family))
-            print(f"  Live quota: subscription={subscription}, region={region}, family={family}")
         q = expand_lookups(q, wb)
         for a, b in substitutions.items():
             q = q.replace(a, b)
@@ -211,8 +183,6 @@ def main():
                 data = json.loads(r.stdout)
                 cols = list(data["data"][0].keys()) if data["data"] else []
                 print(f"  PASS  {name:<18} rows={data['count']:<4} cols={len(cols)}")
-                if name == "quota-demand":
-                    demand_rows = data["data"]
             else:
                 failures += 1
                 err = (r.stderr or r.stdout).strip().splitlines()

@@ -2,10 +2,9 @@
 import copy
 import json
 import unittest
-from unittest.mock import patch
 
 import build_workbook as builder
-from validate_queries import quota_substitutions, structure_check, walk
+from validate_queries import structure_check, walk
 
 
 class WorkbookDeploymentTests(unittest.TestCase):
@@ -57,7 +56,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 21)
+        self.assertEqual(len(queries), 23)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
             if name == "about-allsizes":
@@ -174,18 +173,15 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("isnull(Limit) or isnull(Usage)", check)
         self.assertIn("Not met - quota shortfall", check)
         group = next(i for i in self.workbook["items"] if i["name"] == "grp-quota")
-        live = next(i for i in group["content"]["items"] if i["name"] == "quota-live")
-        parameters = live["content"]["items"][0]["content"]["parameters"]
+        controls = next(i for i in group["content"]["items"] if i["name"] == "quota-parameters")
+        parameters = controls["content"]["parameters"]
         self.assertEqual(len(parameters), 4)
-        for parameter in parameters:
-            endpoint = json.loads(parameter["query"])
-            self.assertEqual(parameter["queryType"], 12)
-            self.assertEqual(endpoint["method"], "GET")
-            self.assertIn("{QuotaSubscription}", endpoint["path"])
-            self.assertIn("{QuotaRegion}", endpoint["path"])
-            self.assertNotIn("defaultValue", parameter)
-            self.assertNotIn("value", parameter)
-            self.assertEqual(endpoint["transformers"][0]["settings"]["columns"][0]["columnid"], "value")
+        self.assertEqual(parameters[0]["name"], "QuotaScope")
+        self.assertEqual([o["value"] for o in json.loads(parameters[0]["jsonData"])], ["selected", "tenant"])
+        self.assertIn("QuotaResources", check)
+        self.assertIn("limit 2000", check)
+        self.assertIn("MetricRecords != 1", check)
+        self.assertIn("InPlaceUnverifiedResources > 0", check)
         families = json.loads(builder.lookup_values(self.workbook)["QuotaFamilyMap"])
         self.assertEqual(families["standard_d2s_v3"], "standardDSv3Family")
         self.assertEqual(families["standard_f2s_v2"], "standardFSv2Family")
@@ -322,24 +318,29 @@ class WorkbookDeploymentTests(unittest.TestCase):
                                          if p["name"] != "RegionIdMap"]
         self.assertIn("missing shared lookup RegionIdMap", structure_check(workbook))
 
-    def test_live_validator_preserves_actual_quota_and_missing_metrics(self):
-        response = {"value": [{"name": {"value": "cores"}, "limit": 100, "currentValue": 18}]}
-        with patch("validate_queries.azure_json", return_value=response):
-            values = quota_substitutions("subscription", "northeurope", "standardDDSv5Family")
-        self.assertEqual(values["{RegionalQuotaLimit}"], "100")
-        self.assertEqual(values["{RegionalQuotaUsage}"], "18")
-        self.assertEqual(values["{FamilyQuotaLimit}"], "null")
-        self.assertEqual(values["{FamilyQuotaUsage}"], "null")
-        self.assertEqual(values["{QuotaFamily}"], "standardDDSv5Family")
+    def test_quota_summary_is_compact_and_retains_shortfalls(self):
+        group = next(i for i in self.workbook["items"] if i["name"] == "grp-quota")
+        queries = {i["name"]: i for i in group["content"]["items"] if i["type"] == 3}
+        summary = queries["quota-summary"]["content"]
+        hidden = {f["columnMatch"] for f in summary["gridSettings"]["formatters"] if f.get("formatter") == 5}
+        self.assertEqual(hidden, {"SubscriptionId", "FailedChecks", "UnknownChecks"})
+        self.assertIn("sumif(CurrentCores, Metric == 'cores')", summary["query"])
+        self.assertIn("pack_array(SubscriptionId, '__total__')", summary["query"])
+        self.assertIn("FailedChecks > 0 and UnknownChecks > 0", summary["query"])
+        colors = next(f for f in summary["gridSettings"]["formatters"] if f["columnMatch"] == "Quota status")
+        self.assertEqual(colors["formatOptions"]["thresholdsGrid"][0]["representation"], "red")
+        for name in ("quota-demand", "quota-check", "quota-headroom"):
+            self.assertEqual(queries[name]["conditionalVisibility"]["parameterName"], "QuotaDetails")
 
-    def test_live_validator_rejects_malformed_quota(self):
-        row = {"name": {"value": "cores"}, "limit": 100, "currentValue": "unknown"}
-        with patch("validate_queries.azure_json", return_value={"value": [row]}):
-            with self.assertRaisesRegex(ValueError, "Non-integer quota"):
-                quota_substitutions("subscription", "northeurope", "standardDDSv5Family")
-        with patch("validate_queries.azure_json", return_value={"value": [row, row]}):
-            with self.assertRaisesRegex(ValueError, "Duplicate Compute quota"):
-                quota_substitutions("subscription", "northeurope", "standardDDSv5Family")
+    def test_quota_headroom_is_not_pooled_with_migration_checks(self):
+        self.assertIn("Counts['cores']", builder.quota_headroom_query("resources"))
+        self.assertIn("FamilyAvailable < RegionalAvailable", builder.quota_headroom_query("resources"))
+        self.assertNotIn("quota_headroom", builder.quota_summary_query("resources"))
+        workbook = copy.deepcopy(self.workbook)
+        group = next(i for i in workbook["items"] if i["name"] == "grp-quota")
+        summary = next(i for i in group["content"]["items"] if i["name"] == "quota-summary")
+        summary["content"]["crossComponentResources"] = ["{Subscriptions}"]
+        self.assertTrue(any("quota-summary: ARG query not scoped" in p for p in structure_check(workbook)))
 
     def test_oversized_workbook_cannot_generate_deployment_template(self):
         with self.assertRaisesRegex(ValueError, "size limit"):

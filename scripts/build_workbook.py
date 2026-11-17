@@ -688,6 +688,7 @@ def sql_modernization_query(sku_map, regions, region_ids):
 def quota_inventory_query(base):
     return base + """
 | where Lifecycle != 'OPTIONAL'
+""" + quota_scope_filter("SubscriptionId") + """
 | extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),
          TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),
          SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),
@@ -700,10 +701,18 @@ def quota_inventory_query(base):
         RegionalIncrement, TargetCores)"""
 
 
+def quota_scope_filter(column):
+    return f"""| where '{{QuotaScope}}' == 'tenant' or {column} in~ ({{Subscriptions}})
+    or strcat('/subscriptions/', {column}) in~ ({{Subscriptions}})
+    or 'value::all' in~ ({{Subscriptions}})"""
+
+
 def quota_demand_query(base):
     return quota_inventory_query(base) + """
 | summarize Resources = count(), Instances = sum(Instances),
         CurrentCores = sum(SourceCores), SideBySideAdditionalCores = sum(TargetCores),
+        CurrentUnknown = countif(isnull(SourceCores) or SourceCores < 0),
+        TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),
         InPlaceAdditionalFamilyCores = sum(FamilyIncrement),
         InPlaceAdditionalRegionalCores = sum(RegionalIncrement),
         UnresolvedResources = countif(Unresolved),
@@ -711,117 +720,227 @@ def quota_demand_query(base):
         TargetSizes = strcat_array(make_set(RecommendedTarget, 100), ', ')
     by SubscriptionId, Region, TargetQuotaFamily
 | extend TargetQuotaFamily = iff(isempty(TargetQuotaFamily), 'Unknown', TargetQuotaFamily),
+         TargetCores = iff(TargetUnknown > 0, tolong(''), SideBySideAdditionalCores),
+         CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),
          EstimateStatus = iff(UnresolvedResources > 0, 'Unknown - incomplete metadata', 'Estimated - validate live quota')
+| extend Delta = TargetCores - CurrentCores
 | order by SubscriptionId asc, Region asc, TargetQuotaFamily asc"""
+
+
+def quota_rows_query():
+    return """QuotaResources
+| where type =~ 'microsoft.compute/locations/usages'
+| mv-expand Quota = properties.value limit 2000
+| project SubscriptionId = tolower(subscriptionId), Region = tolower(location),
+          Metric = tolower(tostring(Quota.name.value)),
+          QuotaLimit = tolong(Quota['limit']), QuotaUsage = tolong(Quota.currentValue)
+| summarize MetricRecords = count(), Limit = max(QuotaLimit), Usage = max(QuotaUsage)
+    by SubscriptionId, Region, Metric"""
 
 
 def quota_check_query(base):
     return quota_inventory_query(base) + """
-| where SubscriptionId =~ '{QuotaSubscription}' and Region =~ '{QuotaRegion}'
 | extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))
 | mv-expand Metric
-| extend Metric = tostring(Metric),
+| extend Metric = tolower(tostring(Metric)),
          InPlaceAdditional = iff(Metric == 'cores', RegionalIncrement, FamilyIncrement)
-| summarize SideBySideAdditionalCores = sum(TargetCores),
+| summarize CurrentCores = sum(SourceCores), TargetCores = sum(TargetCores),
+        CurrentUnknown = countif(isnull(SourceCores) or SourceCores < 0),
+        TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),
+        SideBySideAdditionalCores = sum(TargetCores),
         InPlaceAdditionalCores = sum(InPlaceAdditional),
         InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
-        UnresolvedResources = countif(Unresolved) by Metric
-| where Metric == 'cores' or Metric =~ '{QuotaFamily}'
-| extend Limit = iff(Metric == 'cores', tolong('{RegionalQuotaLimit}'), tolong('{FamilyQuotaLimit}')),
-         Usage = iff(Metric == 'cores', tolong('{RegionalQuotaUsage}'), tolong('{FamilyQuotaUsage}'))
+        UnresolvedResources = countif(Unresolved) by SubscriptionId, Region, Metric
+| join kind=leftouter (
+""" + quota_rows_query() + """
+) on SubscriptionId, Region, Metric
 | extend Available = Limit - Usage,
-         SideBySideShortfall = iff(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0, tolong(''),
+         QuotaUnknown = isnull(MetricRecords) or MetricRecords != 1
+             or isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0
+| extend SideBySideShortfall = iff(QuotaUnknown, tolong(''),
              iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),
-         InPlaceShortfall = iff(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0 or InPlaceUnverifiedResources > 0, tolong(''),
+         InPlaceShortfall = iff(QuotaUnknown or InPlaceUnverifiedResources > 0, tolong(''),
              iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))
-| extend SideBySideStatus = case(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0,
+| extend SideBySideStatus = case(QuotaUnknown,
             'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
-         InPlaceStatus = case(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0,
+         InPlaceStatus = case(QuotaUnknown,
             'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',
-            InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
-         SubscriptionId = '{QuotaSubscription}', Region = '{QuotaRegion}',
+            InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only')
+| extend AdditionalCores = iff('{QuotaMigrationMode}' == 'inplace', InPlaceAdditionalCores, SideBySideAdditionalCores),
+         Shortfall = iff('{QuotaMigrationMode}' == 'inplace', InPlaceShortfall, SideBySideShortfall),
+         SelectedStatus = iff('{QuotaMigrationMode}' == 'inplace', InPlaceStatus, SideBySideStatus)
+| extend QuotaStatus = case(SelectedStatus startswith 'Unknown', SelectedStatus,
+              Shortfall > 0, 'Insufficient quota', 'Sufficient - quota only'),
+         Delta = iff(CurrentUnknown > 0 or TargetUnknown > 0, tolong(''), TargetCores - CurrentCores),
+         CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),
+         TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),
+         QuotaCheck = iff(Metric == 'cores', 'Regional total', Metric),
          DemandEvaluatedAt = now()
 | project SubscriptionId, Region, Metric, Limit, Usage, Available,
+          CurrentCores, TargetCores, Delta, CurrentUnknown, TargetUnknown,
+          AdditionalCores, Shortfall, QuotaStatus, QuotaCheck,
           SideBySideAdditionalCores, SideBySideShortfall, SideBySideStatus,
           InPlaceAdditionalCores, InPlaceShortfall, InPlaceStatus, InPlaceUnverifiedResources, UnresolvedResources, DemandEvaluatedAt
-| order by Metric asc"""
+| order by SubscriptionId asc, Region asc, Metric asc"""
 
 
-def quota_parameter(name, metric, field):
-    endpoint = {
-        "version": "ARMEndpoint/1.0", "data": None, "headers": [], "method": "GET",
-        "path": "/subscriptions/{QuotaSubscription}/providers/Microsoft.Compute/locations/{QuotaRegion}/usages?api-version=2024-07-01",
-        "urlParams": [], "batchDisabled": False,
-        "transformers": [{"type": "jsonpath", "settings": {
-            "tablePath": f"$.value[?(@.name.value=='{metric}')]",
-            "columns": [{"path": f"$.{field}", "columnid": "value", "columnType": "long"}],
-        }}],
-    }
-    return {
-        "version": "KqlParameterItem/1.0", "name": name, "type": 1,
-        "isRequired": True, "isHiddenWhenLocked": True,
-        "queryType": 12, "query": json.dumps(endpoint, separators=(",", ":")),
-    }
+def quota_summary_query(base):
+    return quota_check_query(base) + """
+| extend SummaryScopes = pack_array(SubscriptionId, '__total__')
+| mv-expand SummaryScopes
+| summarize CurrentCores = sumif(CurrentCores, Metric == 'cores'),
+        TargetCores = sumif(TargetCores, Metric == 'cores'),
+        CurrentUnknown = sumif(CurrentUnknown, Metric == 'cores'),
+        TargetUnknown = sumif(TargetUnknown, Metric == 'cores'),
+        FailedChecks = countif(QuotaStatus startswith 'Insufficient'),
+        UnknownChecks = countif(QuotaStatus startswith 'Unknown')
+    by SubscriptionId = tostring(SummaryScopes)
+| join kind=leftouter (
+    ResourceContainers
+    | where type =~ 'microsoft.resources/subscriptions'
+    | project SubscriptionId = tolower(subscriptionId), SubscriptionName = name
+) on SubscriptionId
+| extend CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),
+         TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),
+         TotalOrder = iff(SubscriptionId == '__total__', 0, 1),
+         Scope = iff(SubscriptionId == '__total__',
+             iff('{QuotaScope}' == 'tenant', 'TENANT TOTAL (readable subscriptions)', 'SELECTED SUBSCRIPTIONS TOTAL'),
+             coalesce(SubscriptionName, SubscriptionId)),
+         QuotaStatus = case(FailedChecks > 0 and UnknownChecks > 0, 'Insufficient quota / incomplete checks',
+             FailedChecks > 0, 'Insufficient quota', UnknownChecks > 0, 'Unknown - incomplete checks', 'Sufficient - quota only')
+| order by TotalOrder asc, Scope asc
+| project Scope, ['Current cores'] = CurrentCores, ['Target cores'] = TargetCores,
+          ['Delta (+/-)'] = TargetCores - CurrentCores, ['Quota status'] = QuotaStatus,
+          SubscriptionId, FailedChecks, UnknownChecks"""
+
+
+def quota_headroom_query(base):
+    return quota_inventory_query(base) + """
+| where isnotempty(TargetQuotaFamily)
+| summarize by Region, TargetQuotaFamily
+| join kind=inner (
+""" + quota_rows_query() + """
+| summarize Limits = make_bag(pack(Metric, Limit)), Usages = make_bag(pack(Metric, Usage)),
+        Counts = make_bag(pack(Metric, MetricRecords)) by SubscriptionId, Region
+) on Region
+| extend Family = tolower(TargetQuotaFamily)
+| extend FamilyAvailable = tolong(Limits[Family]) - tolong(Usages[Family]),
+         RegionalAvailable = tolong(Limits['cores']) - tolong(Usages['cores']),
+         QuotaUnknown = isnull(Counts[Family]) or isnull(Counts['cores'])
+             or tolong(Counts[Family]) != 1 or tolong(Counts['cores']) != 1
+             or isnull(tolong(Limits[Family])) or isnull(tolong(Usages[Family]))
+             or isnull(tolong(Limits['cores'])) or isnull(tolong(Usages['cores']))
+             or tolong(Limits[Family]) < 0 or tolong(Usages[Family]) < 0
+             or tolong(Limits['cores']) < 0 or tolong(Usages['cores']) < 0
+| extend AvailableCores = iff(QuotaUnknown, tolong(''),
+             iff(FamilyAvailable < RegionalAvailable, FamilyAvailable, RegionalAvailable))
+| extend HeadroomStatus = case(QuotaUnknown, 'Unknown - quota missing',
+             AvailableCores <= 0, 'No unused quota', 'Potential headroom - assess quota group eligibility')
+| project SubscriptionId, Region, TargetQuotaFamily, AvailableCores, HeadroomStatus
+| order by Region asc, TargetQuotaFamily asc, AvailableCores desc"""
+
+
+def quota_status_formatter(column):
+    return fmt(column, 18, formatOptions={"thresholdsOptions": "colors", "thresholdsGrid": [
+        {"operator": "contains", "thresholdValue": "Insufficient", "representation": "red", "text": "{0}{1}"},
+        {"operator": "contains", "thresholdValue": "Unknown", "representation": "orange", "text": "{0}{1}"},
+        {"operator": "Default", "representation": "green", "text": "{0}{1}"},
+    ]})
 
 
 def quota_planning_items(base):
     demand = arg_query(quota_demand_query(base), "quota-demand", export=True, size=1,
-                       title="Migration core demand by subscription, region and target family")
-    demand["content"]["exportedParameters"] = [
-        {"fieldName": field, "parameterName": parameter}
-        for field, parameter in (("SubscriptionId", "QuotaSubscription"),
-                                 ("Region", "QuotaRegion"), ("TargetQuotaFamily", "QuotaFamily"))
+                       title="Migration breakdown: subscription, region and target family",
+                       grid=grid_settings(
+                           {"SubscriptionId": "30ch", "Region": "15ch", "TargetQuotaFamily": "28ch",
+                            "CurrentCores": "12ch", "TargetCores": "12ch", "Delta": "10ch"},
+                           [fmt(c, 5) for c in ("Resources", "Instances", "SideBySideAdditionalCores",
+                            "InPlaceAdditionalFamilyCores", "InPlaceAdditionalRegionalCores",
+                            "UnresolvedResources", "InPlaceUnverifiedResources", "TargetSizes", "EstimateStatus",
+                            "CurrentUnknown", "TargetUnknown")]))
+    summary = arg_query(quota_summary_query(base), "quota-summary", export=True, size=1,
+                        title="Core migration plan: total and per subscription",
+                        grid=grid_settings(
+                            {"Scope": "38ch", "Current cores": "14ch", "Target cores": "14ch",
+                             "Delta (+/-)": "12ch", "Quota status": "34ch"},
+                            [quota_status_formatter("Quota status")]
+                            + [fmt(c, 5) for c in ("SubscriptionId", "FailedChecks", "UnknownChecks")]))
+    checks = arg_query(quota_check_query(base), "quota-check", export=True, size=1,
+                       title="Automatic quota checks: every affected subscription / region / family",
+                       grid=grid_settings(
+                           {"SubscriptionId": "30ch", "Region": "15ch", "QuotaCheck": "28ch",
+                            "AdditionalCores": "15ch", "Available": "15ch", "Shortfall": "12ch", "QuotaStatus": "32ch"},
+                           [quota_status_formatter("QuotaStatus"), fmt("Shortfall", 18, formatOptions={
+                               "thresholdsOptions": "colors", "thresholdsGrid": [
+                                   {"operator": ">", "thresholdValue": "0", "representation": "red", "text": "{0}{1}"},
+                                   {"operator": "Default", "representation": "gray", "text": "{0}{1}"}]})]
+                           + [fmt(c, 5) for c in ("Metric", "Limit", "Usage", "CurrentCores", "TargetCores",
+                            "Delta", "CurrentUnknown", "TargetUnknown", "SideBySideAdditionalCores",
+                            "SideBySideShortfall", "SideBySideStatus", "InPlaceAdditionalCores",
+                            "InPlaceShortfall", "InPlaceStatus", "InPlaceUnverifiedResources",
+                            "UnresolvedResources", "DemandEvaluatedAt")]))
+    headroom = arg_query(quota_headroom_query(base), "quota-headroom", export=True, size=1,
+                         title="Quota discussion leads: unused quota across readable tenant subscriptions",
+                         grid=grid_settings({"SubscriptionId": "30ch", "Region": "15ch",
+                             "TargetQuotaFamily": "28ch", "AvailableCores": "15ch", "HeadroomStatus": "48ch"}))
+    for item, detail in ((demand, "migration"), (checks, "checks"), (headroom, "headroom")):
+        item["conditionalVisibility"] = {"parameterName": "QuotaDetails", "comparison": "isEqualTo", "value": detail}
+    for item in (demand, summary, checks, headroom):
+        item["content"]["crossComponentResources"] = ["{QuotaAllSubscriptions}"]
+    parameters = [
+        {"name": name, "type": 2, "isRequired": True, "label": label,
+         "jsonData": json.dumps([{"value": value, "label": text} for value, text in choices]),
+         "value": default}
+        for name, label, default, choices in (
+            ("QuotaScope", "Planning scope", "selected",
+             [("selected", "Selected subscriptions"), ("tenant", "Tenant - all readable subscriptions")]),
+            ("QuotaMigrationMode", "Migration approach", "sidebyside",
+             [("sidebyside", "Side-by-side (keep sources)"), ("inplace", "In-place (validate allocation)")]),
+            ("QuotaDetails", "Show detail", "none",
+             [("none", "Summary only"), ("migration", "Migration breakdown"),
+              ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion")]),
+        )
     ]
-    checks = [
-        {"type": 9, "name": "quota-live-parameters", "content": {
-            "version": "KqlParameterItem/1.0", "style": "pills",
-            "parameters": [
-                quota_parameter("RegionalQuotaLimit", "cores", "limit"),
-                quota_parameter("RegionalQuotaUsage", "cores", "currentValue"),
-                quota_parameter("FamilyQuotaLimit", "{QuotaFamily}", "limit"),
-                quota_parameter("FamilyQuotaUsage", "{QuotaFamily}", "currentValue"),
-            ],
-        }},
-        text_item(
-            "### Live quota comparison: {QuotaSubscription} / {QuotaRegion} / {QuotaFamily}\n\n"
-            "Refresh this workbook after selecting a demand row and after any quota/usage change. "
-            "Both regional and family checks must pass. Quota API errors, absent metrics and "
-            "incomplete SKU metadata are **Unknown**, never unlimited or a pass. "
-            "The live calls use your portal identity and require Compute usage-read permission.",
-            "quota-live-intro"),
-        arg_query(quota_check_query(base), "quota-check", export=True, size=1,
-                  title="Regional and selected-family headroom versus migration demand"),
-    ]
+    parameters.append({
+        "name": "QuotaAllSubscriptions", "type": 6, "isRequired": True, "multiSelect": True,
+        "isHiddenWhenLocked": True, "quote": "'", "delimiter": ",",
+        "typeSettings": {"additionalResourceOptions": ["value::all"], "includeAll": True, "showDefault": False},
+        "value": ["value::all"],
+    })
     return [
+        {"type": 9, "name": "quota-parameters", "content": {
+            "version": "KqlParameterItem/1.0", "style": "pills",
+            "parameters": [dict(p, version="KqlParameterItem/1.0") for p in parameters]}},
         text_item(
             "## Capacity / quota planning\n\n"
-            "Demand covers all retirement/EOL VM and VMSS instances in the selected subscriptions, "
-            "independent of Lifecycle status. It uses the default recommended target and current region; "
-            "it is not a right-sizing or cross-region relocation plan. Flexible scale sets are counted "
-            "once through the model capacity, not again through member VMs.\n\n"
-            "**Select a demand row** below to retrieve live quota for its subscription/region/family. "
-            "The family names come from a captured public Compute SKU snapshot, not inferred series names. "
-            "Missing metadata remains explicit. Core charges use captured SKU **vCPUs**, not "
-            "guest-visible vCPUsAvailable for constrained-core sizes. Spot workloads require "
-            "separate Spot quota and make this dedicated-quota estimate unresolved.\n\n"
-            "**Side-by-side:** additional cores equal the full destination fleet, with sources retained. "
-            "**In-place:** regional increase is the sum of positive per-VM core deltas; destination-family "
-            "demand is the full target size when families change, otherwise the positive delta. "
-            "No credit is taken for future deletions or shrinking other VMs. These are conservative "
-            "all-at-once estimates, not a wave schedule. Deallocated inventory is included; allocate/rebuild "
-            "such VMs using the side-by-side requirement rather than assuming an in-place quota credit. "
-            "Deallocated or unknown source power states make the in-place check Unknown, including "
-            "scale-set models without instance allocation evidence.\n\n"
-            "**Quota is not physical capacity.** Check live SKU/zone restrictions, ARM validation, policy, "
-            "cluster constraints and allocation independently. A passing quota check does not reserve "
-            "capacity or approve a migration.",
+            "A compact total plus one row per subscription. Change **Planning scope** to compare selected "
+            "subscriptions with all subscriptions you can read in the current tenant. The tenant view "
+            "cannot include subscriptions hidden by permissions. Other workbook tabs retain their original scope.\n\n"
+            "| Column | Key |\n| --- | --- |\n"
+            "| Current cores | Captured quota-vCPUs of retirement/EOL sources, not all workloads in the subscription. VMSS capacity is counted once; deallocated inventory is included, not asserted to consume quota today. |\n"
+            "| Target cores | Quota-vCPUs needed by their default V5-first targets in the current regions. |\n"
+            "| Delta (+/-) | Target minus current: positive means growth, negative means reduction. **Not** the quota request size. |\n"
+            "| Quota status | **Red: Insufficient quota** if any region or destination family is short. **Orange: Unknown** for missing quota/metadata or unverified in-place allocation. Green means quota only, not migration approval. |\n\n"
+            "**Every affected subscription/region/family is checked automatically**, using indexed Compute "
+            "`QuotaResources` usage and limits. Both regional and family checks must pass; spare quota "
+            "in another subscription or region never cancels a shortfall. Indexing is eventually consistent: "
+            "refresh and recheck with Azure Quotas/CLI before migration. Missing records are Unknown, not unlimited.\n\n"
+            "**Migration approach:** side-by-side requires the full target cores as additional quota. "
+            "In-place uses positive regional deltas, but cross-family moves still need the full target-family "
+            "cores. No negative credits from shrinking other VMs. Spot and deallocated/unknown in-place "
+            "allocations stay Unknown. The Delta column does not change with this choice.\n\n"
+            "**Show detail** opens one optional table at a time. Quota checks explains **AdditionalCores**, "
+            "**Available** (limit minus all current usage), and **Shortfall** (additional minus available, "
+            "floored at zero). Blank shortfall means Unknown. Regional demand includes all target families. "
+            "**Tenant headroom** shows unused quota now in readable subscriptions for relevant regions/families, "
+            "capped by regional headroom. It is not surplus after their planned migrations or a shared pool: "
+            "verify quota-group membership, eligibility, limits and approvals before any reallocation. "
+            "This workbook neither inspects quota-group eligibility nor moves quota.\n\n"
+            "**Quota is not physical capacity.** SKU/zone restrictions, policy, boot/driver compatibility "
+            "and actual allocation still require validation. Targets use captured SKU `vCPUs`, not constrained "
+            "`vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand.",
             "quota-intro"),
-        demand,
-        {"type": 12, "name": "quota-live", "content": {
-            "version": "NotebookGroup/1.0", "groupType": "editable", "items": checks,
-        }, "conditionalVisibility": {
-            "parameterName": "QuotaSubscription", "comparison": "isNotEqualTo", "value": "",
-        }},
+        summary, demand, checks, headroom,
     ]
 
 
