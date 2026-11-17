@@ -40,7 +40,7 @@ PATH_LOOKUP_PARAMETERS = {
     for generation in (5, 6)
 }
 LOOKUP_PARAMETERS = BASE_LOOKUP_PARAMETERS + tuple(
-    name for names in PATH_LOOKUP_PARAMETERS.values() for name in names)
+    name for names in PATH_LOOKUP_PARAMETERS.values() for name in names) + ("QuotaFamilyMap", "QuotaCoreMap")
 
 # Preview mode: restrict the embedded lookup to a named set of sizes so the
 # generated workbook is small enough to paste into the portal for visual review.
@@ -487,13 +487,14 @@ def inventory_query(include_flexible_members=False):
 | extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))
 | extend AvSetId = tostring(properties.availabilitySet.id)
 | extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])
+| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))
 | extend Zone = tostring(zones[0])
 | extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))
 | extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))
 | extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))
 | extend GuestOsName = tostring(properties.extended.instanceView.osName)
 | project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags"""
+          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags"""
 
 
 def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
@@ -684,6 +685,146 @@ def sql_modernization_query(sku_map, regions, region_ids):
 | order by RetiresOn asc, Name asc"""
 
 
+def quota_inventory_query(base):
+    return base + """
+| where Lifecycle != 'OPTIONAL'
+| extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),
+         TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),
+         SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),
+         TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)
+| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)
+        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0
+        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,
+         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
+| extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,
+        RegionalIncrement, TargetCores)"""
+
+
+def quota_demand_query(base):
+    return quota_inventory_query(base) + """
+| summarize Resources = count(), Instances = sum(Instances),
+        CurrentCores = sum(SourceCores), SideBySideAdditionalCores = sum(TargetCores),
+        InPlaceAdditionalFamilyCores = sum(FamilyIncrement),
+        InPlaceAdditionalRegionalCores = sum(RegionalIncrement),
+        UnresolvedResources = countif(Unresolved),
+        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        TargetSizes = strcat_array(make_set(RecommendedTarget, 100), ', ')
+    by SubscriptionId, Region, TargetQuotaFamily
+| extend TargetQuotaFamily = iff(isempty(TargetQuotaFamily), 'Unknown', TargetQuotaFamily),
+         EstimateStatus = iff(UnresolvedResources > 0, 'Unknown - incomplete metadata', 'Estimated - validate live quota')
+| order by SubscriptionId asc, Region asc, TargetQuotaFamily asc"""
+
+
+def quota_check_query(base):
+    return quota_inventory_query(base) + """
+| where SubscriptionId =~ '{QuotaSubscription}' and Region =~ '{QuotaRegion}'
+| extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))
+| mv-expand Metric
+| extend Metric = tostring(Metric),
+         InPlaceAdditional = iff(Metric == 'cores', RegionalIncrement, FamilyIncrement)
+| summarize SideBySideAdditionalCores = sum(TargetCores),
+        InPlaceAdditionalCores = sum(InPlaceAdditional),
+        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        UnresolvedResources = countif(Unresolved) by Metric
+| where Metric == 'cores' or Metric =~ '{QuotaFamily}'
+| extend Limit = iff(Metric == 'cores', tolong('{RegionalQuotaLimit}'), tolong('{FamilyQuotaLimit}')),
+         Usage = iff(Metric == 'cores', tolong('{RegionalQuotaUsage}'), tolong('{FamilyQuotaUsage}'))
+| extend Available = Limit - Usage,
+         SideBySideShortfall = iff(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0, tolong(''),
+             iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),
+         InPlaceShortfall = iff(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0 or InPlaceUnverifiedResources > 0, tolong(''),
+             iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))
+| extend SideBySideStatus = case(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0,
+            'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
+         InPlaceStatus = case(isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0,
+            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',
+            InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
+         SubscriptionId = '{QuotaSubscription}', Region = '{QuotaRegion}',
+         DemandEvaluatedAt = now()
+| project SubscriptionId, Region, Metric, Limit, Usage, Available,
+          SideBySideAdditionalCores, SideBySideShortfall, SideBySideStatus,
+          InPlaceAdditionalCores, InPlaceShortfall, InPlaceStatus, InPlaceUnverifiedResources, UnresolvedResources, DemandEvaluatedAt
+| order by Metric asc"""
+
+
+def quota_parameter(name, metric, field):
+    endpoint = {
+        "version": "ARMEndpoint/1.0", "data": None, "headers": [], "method": "GET",
+        "path": "/subscriptions/{QuotaSubscription}/providers/Microsoft.Compute/locations/{QuotaRegion}/usages?api-version=2024-07-01",
+        "urlParams": [], "batchDisabled": False,
+        "transformers": [{"type": "jsonpath", "settings": {
+            "tablePath": f"$.value[?(@.name.value=='{metric}')]",
+            "columns": [{"path": f"$.{field}", "columnid": "value", "columnType": "long"}],
+        }}],
+    }
+    return {
+        "version": "KqlParameterItem/1.0", "name": name, "type": 1,
+        "isRequired": True, "isHiddenWhenLocked": True,
+        "queryType": 12, "query": json.dumps(endpoint, separators=(",", ":")),
+    }
+
+
+def quota_planning_items(base):
+    demand = arg_query(quota_demand_query(base), "quota-demand", export=True, size=1,
+                       title="Migration core demand by subscription, region and target family")
+    demand["content"]["exportedParameters"] = [
+        {"fieldName": field, "parameterName": parameter}
+        for field, parameter in (("SubscriptionId", "QuotaSubscription"),
+                                 ("Region", "QuotaRegion"), ("TargetQuotaFamily", "QuotaFamily"))
+    ]
+    checks = [
+        {"type": 9, "name": "quota-live-parameters", "content": {
+            "version": "KqlParameterItem/1.0", "style": "pills",
+            "parameters": [
+                quota_parameter("RegionalQuotaLimit", "cores", "limit"),
+                quota_parameter("RegionalQuotaUsage", "cores", "currentValue"),
+                quota_parameter("FamilyQuotaLimit", "{QuotaFamily}", "limit"),
+                quota_parameter("FamilyQuotaUsage", "{QuotaFamily}", "currentValue"),
+            ],
+        }},
+        text_item(
+            "### Live quota comparison: {QuotaSubscription} / {QuotaRegion} / {QuotaFamily}\n\n"
+            "Refresh this workbook after selecting a demand row and after any quota/usage change. "
+            "Both regional and family checks must pass. Quota API errors, absent metrics and "
+            "incomplete SKU metadata are **Unknown**, never unlimited or a pass. "
+            "The live calls use your portal identity and require Compute usage-read permission.",
+            "quota-live-intro"),
+        arg_query(quota_check_query(base), "quota-check", export=True, size=1,
+                  title="Regional and selected-family headroom versus migration demand"),
+    ]
+    return [
+        text_item(
+            "## Capacity / quota planning\n\n"
+            "Demand covers all retirement/EOL VM and VMSS instances in the selected subscriptions, "
+            "independent of Lifecycle status. It uses the default recommended target and current region; "
+            "it is not a right-sizing or cross-region relocation plan. Flexible scale sets are counted "
+            "once through the model capacity, not again through member VMs.\n\n"
+            "**Select a demand row** below to retrieve live quota for its subscription/region/family. "
+            "The family names come from a captured public Compute SKU snapshot, not inferred series names. "
+            "Missing metadata remains explicit. Core charges use captured SKU **vCPUs**, not "
+            "guest-visible vCPUsAvailable for constrained-core sizes. Spot workloads require "
+            "separate Spot quota and make this dedicated-quota estimate unresolved.\n\n"
+            "**Side-by-side:** additional cores equal the full destination fleet, with sources retained. "
+            "**In-place:** regional increase is the sum of positive per-VM core deltas; destination-family "
+            "demand is the full target size when families change, otherwise the positive delta. "
+            "No credit is taken for future deletions or shrinking other VMs. These are conservative "
+            "all-at-once estimates, not a wave schedule. Deallocated inventory is included; allocate/rebuild "
+            "such VMs using the side-by-side requirement rather than assuming an in-place quota credit. "
+            "Deallocated or unknown source power states make the in-place check Unknown, including "
+            "scale-set models without instance allocation evidence.\n\n"
+            "**Quota is not physical capacity.** Check live SKU/zone restrictions, ARM validation, policy, "
+            "cluster constraints and allocation independently. A passing quota check does not reserve "
+            "capacity or approve a migration.",
+            "quota-intro"),
+        demand,
+        {"type": 12, "name": "quota-live", "content": {
+            "version": "NotebookGroup/1.0", "groupType": "editable", "items": checks,
+        }, "conditionalVisibility": {
+            "parameterName": "QuotaSubscription", "comparison": "isNotEqualTo", "value": "",
+        }},
+    ]
+
+
 # --------------------------------------------------------------------------
 # Workbook item helpers
 # --------------------------------------------------------------------------
@@ -843,7 +984,44 @@ def upgrade_path_panel(generation, lookups):
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
          ConversionRequired = iff(isempty(RecommendedTarget) or VmGeneration == 'Unknown', tobool(''), NeedsGen2 == 1),
          NvmeRequired = iff(isempty(RecommendedTarget), tobool(''), PenNvme > 0)
-| project Resource, Target, Prerequisites, Validation, ResourceId,
+| extend TargetSelection = iff(isempty(RecommendedTarget), 'Not met', 'Met'),
+         GenerationSupport = case(isempty(RecommendedTarget) or VmGeneration == 'Unknown', 'Unknown',
+             NeedsGen2 == 1, 'Not met', 'Met'),
+         ConversionOS = case(isempty(RecommendedTarget), 'Unknown',
+             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',
+             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',
+             VmGeneration == 'Unknown', 'Unknown',
+             GuestOsName contains '2016', 'Not met', 'Unknown'),
+         ConversionEncryption = case(isempty(RecommendedTarget), 'Unknown',
+             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',
+             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',
+             VmGeneration == 'Unknown', 'Unknown',
+             DiskAdeConfigured == true, 'Not met', 'Unknown'),
+         NvmeBoot = case(isempty(RecommendedTarget), 'Unknown',
+             PenNvme == 0, 'Not applicable',
+             isnotempty(DiskControllers) and DiskControllers !contains 'NVMe', 'Not met', 'Unknown'),
+         ManaNetworking = 'Unknown',
+         Architecture = case(isempty(RecommendedTarget), 'Unknown', PenArch > 0, 'Not met', 'Met'),
+         MemoryCapacity = case(isempty(RecommendedTarget) or isnull(toreal(TargetMemoryGB)) or isnull(CurrentMemoryGB), 'Unknown',
+             PenMem > 0, 'Not met', 'Met'),
+         LocalDisk = case(isempty(RecommendedTarget) or WarnCodes has 'l', 'Unknown',
+             PenTemp > 0, 'Not met', 'Unknown'),
+         CatalogueRegion = case(TargetInRegion == 'Yes', 'Met', TargetInRegion == 'No', 'Not met', 'Unknown'),
+         ZonePlacement = iff(isempty(Zone), 'Not applicable', 'Unknown'),
+         AvailabilitySet = iff(isempty(AvSetId), 'Not applicable', 'Unknown'),
+         ScaleSetModel = iff(IsVmss, 'Unknown', 'Not applicable'),
+         DiskLimits = 'Unknown', NicLimits = 'Unknown',
+         Quota = 'Unknown', Policy = 'Unknown', AllocationCapacity = 'Unknown',
+         Backup = 'Unknown',
+         AsrConversion = case(isempty(RecommendedTarget), 'Unknown',
+             not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),
+         ApplicationValidation = 'Unknown', Rollback = 'Unknown'
+| project Resource, Target, TargetSelection, GenerationSupport, ConversionOS,
+          ConversionEncryption, NvmeBoot, ManaNetworking, Architecture, MemoryCapacity,
+          LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,
+          DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,
+          ApplicationValidation, Rollback,
+          Prerequisites, Validation, ResourceId,
           VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence
 | order by Resource asc"""
     guidance = (
@@ -884,13 +1062,28 @@ def upgrade_path_panel(generation, lookups):
                     query, f"path-v{generation}-grid", size=1, export=True,
                     title=f"V{generation} targets and prerequisites",
                     grid=grid_settings(
-                        {"Resource": "24%", "Target": "18%", "Prerequisites": "32%", "Validation": "26%"},
+                        {"Resource": "28ch", "Target": "24ch",
+                         **{name: "20ch" for name in (
+                             "TargetSelection", "GenerationSupport", "ConversionOS",
+                             "ConversionEncryption", "NvmeBoot", "ManaNetworking",
+                             "Architecture", "MemoryCapacity", "LocalDisk", "CatalogueRegion",
+                             "ZonePlacement", "AvailabilitySet", "ScaleSetModel",
+                             "DiskLimits", "NicLimits", "Quota", "Policy", "AllocationCapacity",
+                             "Backup", "AsrConversion", "ApplicationValidation", "Rollback")},
+                         "Prerequisites": "70ch", "Validation": "70ch"},
                         [fmt("Resource", 1, formatOptions={"linkColumn": "ResourceId",
                                                          "linkTarget": "Resource",
                                                          "linkIsContextBlade": True})]
                         + [fmt(name, 5) for name in hidden],
                         filter=True)),
-                text_item(checklist, f"path-v{generation}-checklist"),
+                text_item(
+                    "**Status legend:** Met = observed/captured evidence meets this specific check; "
+                    "Not met = observed mismatch; Unknown = validation evidence missing; "
+                    "Not applicable = this target/route does not trigger the check. "
+                    "Scroll horizontally or export for all prerequisite columns. Catalogue matches "
+                    "are not guest certification or a live capacity guarantee. The OS/encryption "
+                    "checks describe the documented Trusted Launch conversion route, not every rebuild.\n\n"
+                    + checklist, f"path-v{generation}-checklist"),
             ],
         },
     }
@@ -905,6 +1098,10 @@ def build(data):
     path_lookups = {generation: build_lookups(data, path_generation=generation)
                     for generation in (5, 6)}
     shared_lookups = dict(zip(BASE_LOOKUP_PARAMETERS, (sku_map, tgt_regions, region_ids)))
+    with open(os.path.join(REFS, "quota-families.json"), encoding="utf-8-sig") as f:
+        quota_metadata = json.load(f)
+    shared_lookups["QuotaFamilyMap"] = quota_metadata["families"]
+    shared_lookups["QuotaCoreMap"] = quota_metadata["vcpus"]
     for generation, lookup in path_lookups.items():
         shared_lookups.update(zip(PATH_LOOKUP_PARAMETERS[generation],
                                   (lookup[0], lookup[3], lookup[4])))
@@ -995,7 +1192,7 @@ def build(data):
             "version": "KqlParameterItem/1.0",
             "parameters": [
                 {
-                    "id": f"b0a1f2c3-4444-4a44-9c04-00000000000{i}",
+                    "id": f"b0a1f2c3-4444-4a44-9c04-{i:012d}",
                     "version": "KqlParameterItem/1.0",
                     "name": name,
                     "type": 1,
@@ -1013,6 +1210,7 @@ def build(data):
     tabs = [("Overview", "overview"), ("Impacted resources", "impacted"),
             ("SQL modernization", "sql"),
             ("Upgrade paths", "paths"),
+            ("Capacity / quota", "quota"),
             ("Target mapping", "mapping"), ("Prerequisites", "prereq"),
             ("Migration plan", "plan"), ("About", "about")]
     items.append({
@@ -1041,6 +1239,7 @@ def build(data):
         upgrade_path_panel(5, path_lookups[5]),
         upgrade_path_panel(6, path_lookups[6]),
     ]))
+    items.append(group_item("grp-quota", "quota", quota_planning_items(base)))
 
     # ---------------- TAB 1: Overview ----------------
     ov = []

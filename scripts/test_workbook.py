@@ -2,9 +2,10 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
 import build_workbook as builder
-from validate_queries import structure_check, walk
+from validate_queries import quota_substitutions, structure_check, walk
 
 
 class WorkbookDeploymentTests(unittest.TestCase):
@@ -44,7 +45,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
             for p in item["content"]["parameters"]
             if p["name"] in builder.LOOKUP_PARAMETERS
         ]
-        self.assertEqual(len(parameters), 9)
+        self.assertEqual(len(parameters), 11)
         for parameter in parameters:
             self.assertEqual(parameter["type"], 1)
             self.assertTrue(parameter["isHiddenWhenLocked"])
@@ -56,7 +57,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 19)
+        self.assertEqual(len(queries), 21)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
             if name == "about-allsizes":
@@ -140,6 +141,54 @@ class WorkbookDeploymentTests(unittest.TestCase):
             self.assertIn("Manual selection required", query)
             self.assertIn("Custom/gallery image - verify guest drivers", query)
             self.assertNotIn("| project ReadinessScore", query)
+
+    def test_prerequisite_statuses_preserve_explicit_unknowns(self):
+        queries = []
+        walk(self.workbook, queries)
+        for generation in (5, 6):
+            query = dict(queries)[f"path-v{generation}-grid"]
+            for column in ("TargetSelection", "GenerationSupport", "ConversionOS",
+                           "ConversionEncryption", "NvmeBoot", "ManaNetworking",
+                           "Architecture", "MemoryCapacity", "LocalDisk",
+                           "CatalogueRegion", "ZonePlacement", "AvailabilitySet",
+                           "ScaleSetModel", "DiskLimits", "NicLimits", "Quota", "Policy",
+                           "AllocationCapacity", "Backup", "AsrConversion", "ApplicationValidation", "Rollback"):
+                self.assertIn(column, query)
+            self.assertIn("ManaNetworking = 'Unknown'", query)
+            self.assertIn("Quota = 'Unknown'", query)
+            self.assertIn("GuestOsName contains '2016', 'Not met'", query)
+            self.assertIn("DiskAdeConfigured == true, 'Not met'", query)
+            self.assertIn("'Not applicable'", query)
+
+    def test_quota_demand_models_and_live_parameters_are_explicit(self):
+        queries = []
+        walk(self.workbook, queries)
+        demand = dict(queries)["quota-demand"]
+        check = dict(queries)["quota-check"]
+        self.assertIn("| where Lifecycle != 'OPTIONAL'", demand)
+        self.assertNotIn("{LifecycleFilter}", demand)
+        self.assertIn("toint(sku.capacity)", demand)
+        self.assertIn("SourceQuotaFamily == TargetQuotaFamily", demand)
+        self.assertIn("TargetCores > SourceCores", demand)
+        self.assertIn("UnresolvedResources", demand)
+        self.assertIn("isnull(Limit) or isnull(Usage)", check)
+        self.assertIn("Not met - quota shortfall", check)
+        group = next(i for i in self.workbook["items"] if i["name"] == "grp-quota")
+        live = next(i for i in group["content"]["items"] if i["name"] == "quota-live")
+        parameters = live["content"]["items"][0]["content"]["parameters"]
+        self.assertEqual(len(parameters), 4)
+        for parameter in parameters:
+            endpoint = json.loads(parameter["query"])
+            self.assertEqual(parameter["queryType"], 12)
+            self.assertEqual(endpoint["method"], "GET")
+            self.assertIn("{QuotaSubscription}", endpoint["path"])
+            self.assertIn("{QuotaRegion}", endpoint["path"])
+            self.assertNotIn("defaultValue", parameter)
+            self.assertNotIn("value", parameter)
+            self.assertEqual(endpoint["transformers"][0]["settings"]["columns"][0]["columnid"], "value")
+        families = json.loads(builder.lookup_values(self.workbook)["QuotaFamilyMap"])
+        self.assertEqual(families["standard_d2s_v3"], "standardDSv3Family")
+        self.assertEqual(families["standard_f2s_v2"], "standardFSv2Family")
 
     def test_path_targets_and_prerequisites_are_independent(self):
         for generation, target in ((5, "Standard_D2ds_v5"), (6, "Standard_D2ads_v6")):
@@ -272,6 +321,25 @@ class WorkbookDeploymentTests(unittest.TestCase):
         item["content"]["parameters"] = [p for p in item["content"]["parameters"]
                                          if p["name"] != "RegionIdMap"]
         self.assertIn("missing shared lookup RegionIdMap", structure_check(workbook))
+
+    def test_live_validator_preserves_actual_quota_and_missing_metrics(self):
+        response = {"value": [{"name": {"value": "cores"}, "limit": 100, "currentValue": 18}]}
+        with patch("validate_queries.azure_json", return_value=response):
+            values = quota_substitutions("subscription", "northeurope", "standardDDSv5Family")
+        self.assertEqual(values["{RegionalQuotaLimit}"], "100")
+        self.assertEqual(values["{RegionalQuotaUsage}"], "18")
+        self.assertEqual(values["{FamilyQuotaLimit}"], "null")
+        self.assertEqual(values["{FamilyQuotaUsage}"], "null")
+        self.assertEqual(values["{QuotaFamily}"], "standardDDSv5Family")
+
+    def test_live_validator_rejects_malformed_quota(self):
+        row = {"name": {"value": "cores"}, "limit": 100, "currentValue": "unknown"}
+        with patch("validate_queries.azure_json", return_value={"value": [row]}):
+            with self.assertRaisesRegex(ValueError, "Non-integer quota"):
+                quota_substitutions("subscription", "northeurope", "standardDDSv5Family")
+        with patch("validate_queries.azure_json", return_value={"value": [row, row]}):
+            with self.assertRaisesRegex(ValueError, "Duplicate Compute quota"):
+                quota_substitutions("subscription", "northeurope", "standardDDSv5Family")
 
     def test_oversized_workbook_cannot_generate_deployment_template(self):
         with self.assertRaisesRegex(ValueError, "size limit"):

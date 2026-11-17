@@ -53,7 +53,8 @@ Gen1 VMs, one Gen2 VM and one v3 end-of-life VM.</sub>
 | **Overview** | Fleet summary tiles (impacted resources, instances, retirement vs end-of-life split, count needing prerequisite work, fleet readiness score, days to next retirement), urgency and actual-VM-generation donuts, complexity breakdown, commercial impact (pricing update and Reserved Instance status), top affected sizes |
 | **Impacted resources** | Two independent sections: retirement/end-of-life candidates with upgrade prerequisites, and potential regional price exposure (including reported exclusions and source/scope caveats) |
 | **SQL modernization** | Retiring/end-of-life VMs with SQL IaaS Agent extension evidence, provisioning/power states and an assessment checklist; extension presence is not proof of SQL runtime or managed-service suitability |
-| **Upgrade paths** | Side-by-side V5 and V6 panels, each with independently selected targets, per-resource prerequisites, observed OS/encryption/image signals, validation gaps and its own checklist |
+| **Upgrade paths** | Side-by-side V5 and V6 panels, independently selected targets and a separate four-state status column for each prerequisite |
+| **Capacity / quota** | Fleet target-core estimates by subscription, region and quota family, plus a selected-row live regional/family quota check for side-by-side and in-place planning |
 | **Target mapping** | Two grids. *Recommended targets*: current spec, recommended target, memory-preserving alternative, retirement date — the size name links to the announcement. *Alternates, series detail and commercial impact*: up to three alternates, size-level considerations, series spec deltas, whether the 1 Feb 2027 pricing update applies, and when Reserved Instance coverage ends |
 | **Prerequisites** | Prerequisites triggered by *this* fleet, ranked Blocking / Validate / Plan, with what to do, why it matters, how to do it and a docs link, plus the count of affected resources and the sizes involved |
 | **Migration plan** | Five suggested waves, a burn-down by retirement quarter, and the long-pole workloads to start first |
@@ -149,6 +150,49 @@ Gen1-to-Trusted-Launch conversion are explicitly distinguished from an ordinary
 resize or a rebuild. No guest inspection or migration is performed by the workbook.
 Each panel exports the additional evidence columns; neither displays a synthetic
 "ready" score while guest compatibility is unverified.
+
+Each prerequisite has its own **Met / Not met / Unknown / Not applicable**
+column: target selection, generation, conversion OS/encryption, NVMe boot, MANA,
+architecture, memory, local disk, catalogue region, zone, availability set,
+scale-set model, disk/NIC limits, quota, policy, allocation capacity, backup,
+ASR conversion, application validation and rollback. Scroll each grid horizontally
+or export it to inspect all columns. **Met** means only that the available evidence
+satisfies that particular check; missing guest, placement, quota or application
+evidence stays **Unknown**. The paths' quota column is not automatically certified
+by a separate selected-row quota check.
+
+### Capacity / quota
+
+The fleet summary includes all retirement/EOL candidates in the selected
+subscriptions, independently of the lifecycle display filter. It uses default
+v5-first recommendations and current regions, not hypothetical cross-region
+moves or the separate V6 comparison. It groups demand by subscription, region
+and actual target quota family. Scale sets use model capacity and Flexible
+members are not double-counted.
+
+- **Side-by-side:** the entire target fleet needs additional cores while sources
+  remain allocated.
+- **In-place regional:** sum positive target-minus-source core deltas, without
+  granting negative credits for downsizing other resources.
+- **In-place family:** positive deltas for same-family moves; full target cores
+  for cross-family moves. This assumes the source allocation can be retained or
+  released as planned. Deallocated or unknown source power states (including
+  scale-set models without instance evidence) make the in-place check **Unknown**,
+  with null shortfall. Use side-by-side demand when allocation or resize
+  sequencing is uncertain.
+
+Select a demand row to compare both the **whole selected region's** demand against
+regional quota and the **selected family's** demand against its family quota.
+Four read-only ARM parameter lookups retrieve current usage and limits. Both checks
+must pass; quota **does not reserve physical capacity** or satisfy SKU restrictions,
+policy, zone, guest-driver or application prerequisites. Estimates assume concurrent
+migration; waves and other ongoing deployments can change requirements.
+
+Missing CPU/family metadata, missing quota, or Spot workloads keep the relevant
+estimate **Unknown**, not unlimited or zero shortfall. Refresh/reselect the row
+before a migration and investigate any ARM/permission error rather than relying
+on previously displayed values. The workbook does not request quota increases.
+The SKU map uses actual `vCPUs`, not constrained-core `vCPUsAvailable`.
 
 ### Prerequisites
 
@@ -288,7 +332,8 @@ The first row is the dangerous one: a production VM sequenced into wave 1.
 ## The queries
 
 Every Azure Resource Graph query the workbook runs is documented verbatim in
-[`docs/QUERIES.md`](docs/QUERIES.md) - 19 read-only queries, with the shared base
+[`docs/QUERIES.md`](docs/QUERIES.md) - 21 read-only ARG queries and four ARM quota
+parameter lookups, with the shared base
 pipeline shown once and each per-tab tail alongside it. Nothing is hidden: you
 can audit exactly what executes against your tenant before you deploy.
 
@@ -351,7 +396,9 @@ To deploy, you need `Contributor` on the destination resource group (or a
 custom role permitting deployments and `Microsoft.Insights/workbooks/write`).
 `Reader` is sufficient to view queried resources, but not to deploy or save a
 workbook. To use the workbook, you need `Reader` on every subscription in scope.
-The workbook issues **read-only** Azure Resource Graph queries, writes nothing,
+Live quota checks additionally need `Microsoft.Compute/locations/usages/read`
+on the selected subscription (included in Reader). The workbook issues
+**read-only** Azure Resource Graph queries and ARM GET requests, writes nothing,
 needs no agent and no Log Analytics workspace, and no data leaves the tenant.
 
 If a subscription grants read on `virtualMachines` but not on `disks`, the OS-disk
@@ -367,7 +414,9 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # structural checks + run all 19 queries live
+python scripts/validate_queries.py    # all 21 live queries in the current CLI subscription
+# Optional explicit live quota selection (use an actual Compute family):
+# python scripts/validate_queries.py --subscription <id> --quota-region <region> --quota-family <family>
 ```
 
 `build_workbook.py` writes four files: the workbook and ARM template under
@@ -380,7 +429,10 @@ Without `--offline`, `validate_queries.py` needs `az login` and the
 `resource-graph` CLI extension. It
 verifies that tab links match group visibility conditions, that every query is
 scoped to `{Subscriptions}` and references only declared parameters, and that all
-19 Resource Graph queries execute successfully. Azure Resource Graph throttles
+21 Resource Graph queries execute successfully. Live validation defaults to the
+current CLI subscription and the first returned quota-demand row; use the explicit
+flags when there is no suitable demand row. It fetches actual quota values through
+the same Compute usage API as the workbook. Azure Resource Graph throttles
 aggressive callers, so an occasional single-query failure on a back-to-back run is
 a rate limit rather than a regression - re-run to confirm.
 
@@ -393,6 +445,12 @@ alternates and warning codes, and self-declares:
 
 > PUBLIC - all lifecycle facts sourced from learn.microsoft.com. Contains NO
 > pre-announcement pricing information.
+
+`references/quota-families.json` captures 1,284 public Compute SKU family and
+quota-vCPU mappings. It contains no subscription IDs, usage, quota limits or tenant
+information. Refresh it from the Compute SKU API when adding sizes; preserve
+the API's family casing for the workbook's case-sensitive JSONPath selection.
+Live quota/usage is never embedded in the published artifacts.
 
 Prerequisite copy and series lifecycle detail were originally separate reference
 files; they are now inlined in `scripts/build_workbook.py` as the `PREREQ` and
@@ -411,7 +469,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 19 queries while keeping the saved workbook below
+628-size catalogue and all 21 queries while keeping the saved workbook below
 1 MB. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
 
