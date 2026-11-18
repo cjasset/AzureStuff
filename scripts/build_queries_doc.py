@@ -17,6 +17,15 @@ DOCS = os.path.join(ROOT, "docs")
 
 # Human descriptions keyed by the workbook item name.
 DESCRIPTIONS = {
+    "discovery-compute": ("Workload discovery", "Compute ownership and resource evidence; NIC/disk visibility, "
+                          "SQL/SAP signals, service-specific migration methods and conservative OS hints. "
+                          "Flexible member details are not additive to model capacity."),
+    "discovery-services": ("Workload discovery", "Independent service registrations, even without backing "
+                           "compute. Host-pool, SQL, SAP and managed resource-group metadata are evidence, not runtime proof."),
+    "discovery-pools": ("Workload discovery", "Configured AKS/Batch pool sizes, autoscaler maxima, surge and "
+                        "node targets; not running-node counts or automatic additions to the Compute quota plan."),
+    "eligibility-sources": ("Upgrade paths", "Select an exact V5/V6 target and export its subscription, current "
+                            "region and source zone to the separate read-only Compute SKU API inspector."),
     "quota-demand": ("Capacity / quota", "Optional source/target/delta breakdown by subscription, region "
                      "and captured target family, respecting the planning-scope dropdown."),
     "quota-check": ("Capacity / quota", "Automatic regional and family quota checks for every affected "
@@ -45,9 +54,9 @@ DESCRIPTIONS = {
     "regional-price-grid": ("Impacted resources", "Independent inventory of VMs and scale sets "
                             "in seven regions with publicly reported pricing changes; potential exposure "
                             "and reported exclusions, not a confirmed bill forecast."),
-    "sql-modernization-grid": ("SQL modernization", "Retiring VMs with matching SQL IaaS "
-                               "extension publisher/handler evidence, deduplicated per VM, including "
-                               "Flexible members. Runtime and migration suitability remain unverified."),
+    "sql-modernization-grid": ("SQL modernization", "Retiring VMs with exact SQL IaaS extension identity "
+                               "and/or SQL VM registration, deduplicated per VM, including Flexible members. "
+                               "Edition/license/group registration are not runtime or HA-health proof."),
     "path-v5-grid": ("Upgrade paths", "Left-hand V5 panel: independent v5 target, "
                      "target-specific prerequisites, OS/encryption/image signals and explicit unknowns."),
     "path-v6-grid": ("Upgrade paths", "Right-hand V6 panel: independent v6 target, "
@@ -65,8 +74,8 @@ DESCRIPTIONS = {
                       "with the longest lead time."),
     "about-coverage": ("About", "How many resources matched the lifecycle catalogue, "
                        "by lifecycle stage."),
-    "about-allsizes": ("About", "Every VM size in scope, including sizes with no "
-                       "lifecycle action, as a coverage cross-check."),
+    "about-allsizes": ("About", "Every VM size in scope with explicit mapped/unassessed classification. "
+                       "Unknown SKUs are retained, and Flexible model capacity is counted once."),
 }
 
 BAG = re.compile(r"parse_json\('\{.*?\}'\)", re.S)
@@ -108,7 +117,9 @@ def main():
     elided = {name: elide(expand_lookups(c["query"], wb)) for name, c in queries}
     # about-allsizes is a standalone coverage query, not part of the fleet
     # pipeline, so it would collapse the shared prefix to nothing.
-    fleet = [q for n, q in elided.items() if n != "about-allsizes"]
+    independent = {"about-allsizes", "regional-price-grid"}
+    fleet = [q for n, q in elided.items()
+             if n not in independent and not n.startswith("discovery-")]
     prefix = common_prefix(fleet)
     prefix_text = "\n".join(prefix)
 
@@ -133,6 +144,13 @@ def main():
         "all readable subscriptions in the current tenant and apply their separate "
         "planning-scope dropdown; the headroom view uses tenant-wide candidates.",
         "",
+        "The Upgrade paths tab also has one **read-only ARM GETARRAY** inspector for "
+        "`/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus`, API version "
+        "`2021-07-01`, filtered to `{LiveRegion}`. Its JSONPath selects the exact "
+        "`{LiveTarget}` and preserves full restrictions, location/zone information and capabilities. "
+        "The target is exported from a selected source row; a missing record is Unknown. "
+        "No restriction is interpreted as quota, policy or allocation approval.",
+        "",
         "Quota checks use indexed Compute `QuotaResources` rather than per-row ARM "
         "lookups. This enables automatic cross-subscription checks but is eventually "
         "consistent; verify with Azure Quotas/CLI immediately before migration.",
@@ -144,7 +162,7 @@ def main():
         "",
         "- [The shared base query](#the-shared-base-query)",
     ]
-    order = ["Overview", "Impacted resources", "SQL modernization", "Upgrade paths",
+    order = ["Overview", "Impacted resources", "Workload discovery", "SQL modernization", "Upgrade paths",
              "Capacity / quota", "Target mapping", "Prerequisites",
              "Migration plan", "About", "Other"]
     tabs = [t for t in order if t in by_tab]
@@ -188,7 +206,7 @@ def main():
         "Every fleet query below starts with this pipeline. It inventories the VMs "
         "and scale sets, joins each to its managed OS disk to read the real "
         "`hyperVGeneration`, looks the size up in the lifecycle catalogue, and "
-        "computes the readiness score from the resulting attributes. Per-query "
+        "computes a platform-only score (legacy field `ReadinessScore`), not application approval. Per-query "
         "tails are shown in the sections that follow and should be appended to this "
         "prefix.",
         "",

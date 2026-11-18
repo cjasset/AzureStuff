@@ -18,6 +18,9 @@ not contractual rates or a bill forecast.
 import json
 import os
 
+from workload_evidence import (compute_evidence_query, configured_pools_query,
+                               os_eligibility_query, service_inventory_query,
+                               sql_evidence_query)
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -492,9 +495,10 @@ def inventory_query(include_flexible_members=False):
 | extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))
 | extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))
 | extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))
+| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))
 | extend GuestOsName = tostring(properties.extended.instanceView.osName)
 | project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, GuestOsName, IsVmss, Tags = tags"""
+          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags"""
 
 
 def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
@@ -548,13 +552,12 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         'No')
 | extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')
 // Reserved Instance purchases and renewals for these series ended 2026-07-01.
-// Once an existing RI expires the workload bills at pay-as-you-go, even when
-// the reservation is set to auto-renew. Public source: Azure update 560948.
+// This series-wide cutoff is not a customer's reservation expiry or billing coverage.
 | extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))
 | extend RiStatus = case(
-        isempty(RiEnded), 'Not applicable',
-        todatetime(RiEnded) < now(), 'Expired - billing at pay-as-you-go',
-        'Expires - no renewal available')
+        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',
+        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',
+        'Series purchase/renewal cutoff upcoming; coverage not assessed')
 // ---- readiness penalties, evaluated against the REAL fleet attributes ----
 | extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)
 | extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)
@@ -571,10 +574,11 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
 | extend PenVmss = iff(IsVmss, 5, 0)
 | extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))
 | extend Complexity = case(
-        ReadinessScore >= 85, 'Low - in-place resize',
-        ReadinessScore >= 60, 'Medium - validate then resize',
-        ReadinessScore >= 35, 'High - prerequisites required',
-        'Very high - re-architecture')
+        ReadinessScore >= 85, 'Few scored platform changes - validation required',
+        ReadinessScore >= 60, 'Moderate scored platform changes',
+        ReadinessScore >= 35, 'Substantial scored platform changes',
+        'Major scored platform changes')
+| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'
 | extend Urgency = case(
         DaysToRetirement < 0, 'No retirement date',
         DaysToRetirement <= 180, 'Critical - under 6 months',
@@ -648,24 +652,6 @@ def regional_price_query(data):
 | order by AnnouncedRegionalPercent desc, Region asc, Name asc"""
 
 
-def sql_extension_query():
-    return """resources
-| where type =~ 'microsoft.compute/virtualmachines/extensions'
-| where tostring(properties.publisher) =~ 'Microsoft.SqlServer.Management'
-| where tostring(properties.type) =~ 'SqlIaaSAgent'
-    or tostring(properties.typePropertiesType) =~ 'SqlIaaSAgent'
-| extend ParentOffset = indexof(tolower(id), '/extensions/')
-| where ParentOffset > 0
-| extend VmId = tolower(substring(id, 0, ParentOffset)),
-         ExtensionName = tostring(split(name, '/')[-1]),
-         ExtensionState = tostring(properties.provisioningState)
-| extend ExtensionState = iff(isempty(ExtensionState), 'Unknown', ExtensionState)
-| summarize SqlExtensionCount = count(),
-            SqlExtensions = strcat_array(make_set(ExtensionName, 20), ', '),
-            ExtensionStates = strcat_array(make_set(ExtensionState, 20), ', ')
-    by VmId"""
-
-
 def sql_modernization_query(sku_map, regions, region_ids):
     return base_query(
         sku_map, regions, region_ids, include_optional=False, use_lookup_parameters=True,
@@ -673,14 +659,19 @@ def sql_modernization_query(sku_map, regions, region_ids):
 | where not(IsVmss)
 | extend VmId = tolower(ResourceId)
 | join kind=inner (
-{sql_extension_query()}
+{sql_evidence_query()}
   ) on VmId
-| extend Opportunity = 'Retiring VM with SQL IaaS extension - assess modernization',
-         SqlRuntime = 'Unverified - extension presence does not prove SQL is running',
+| extend DiscoverySignals = case(SqlExtensionCount > 0 and SqlRegistrationCount > 0, 'SQL IaaS extension and SQL VM registration',
+             SqlExtensionCount > 0, 'SQL IaaS extension only', 'SQL VM registration only'),
+         Opportunity = 'Retiring VM with SQL evidence - assess modernization',
+         SqlRuntime = 'Unverified - extension or registration does not prove SQL is running',
+         HaEvidence = iff(isempty(SqlGroupIds), 'HA topology not established', 'SQL VM group registered - active HA membership/health unverified'),
          Assessment = 'Validate SQL instances/version/edition, database compatibility, dependencies, HA/DR, performance, licensing and downtime; assess Azure SQL Managed Instance, Azure SQL Database or supported SQL on modern VMs.',
          Guidance = 'https://learn.microsoft.com/azure/azure-sql/migration-guides/'
 | project Name, ResourceGroup, Region, VmSize, Lifecycle, RetiresOn, PowerState,
-          SqlExtensions, ExtensionStates, SqlExtensionCount, Opportunity,
+          DiscoverySignals, SqlExtensions, ExtensionStates, SqlExtensionCount,
+          SqlRegistrationCount, SqlRegistrationIds, SqlRegistrationStates, SqlEditions,
+          SqlLicenseTypes, SqlManagementModes, SqlGroupIds, HaEvidence, Opportunity,
           SqlRuntime, Assessment, RecommendedTarget, Guidance, ResourceId
 | order by RetiresOn asc, Name asc"""
 
@@ -1067,6 +1058,7 @@ def upgrade_path_panel(generation, lookups):
     query = base_query(
         sku_map, regions, region_ids, include_optional=False, use_lookup_parameters=True,
         lookup_parameters=PATH_LOOKUP_PARAMETERS[generation])
+    query += os_eligibility_query()
     query += """
 | extend ImageProvenance = case(
         isnotempty(ImageId), 'Custom/gallery image - verify guest drivers',
@@ -1097,7 +1089,9 @@ def upgrade_path_panel(generation, lookups):
                 '; Current OS disk does not advertise NVMe - validate image/disk/boot-driver compatibility', '')))
 | extend Validation = strcat('Catalogue region: ', TargetInRegion, '. ', OsEvidence, '. ',
         EncryptionEvidence, '. ', ImageProvenance,
-        '. Unverified: MANA/traffic, target quota/policy/capacity, storage IOPS/NIC limits, application/rollback.',
+        '. ', NvmeOsHint, '. ', ManaOsHint,
+        '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
+        'Use Capacity / quota for the default V5-first fleet model; that result is not a V6-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
@@ -1141,7 +1135,9 @@ def upgrade_path_panel(generation, lookups):
           DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,
           ApplicationValidation, Rollback,
           Prerequisites, Validation, ResourceId,
-          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence
+          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence,
+          OsHintSource, NvmeOsHint, ManaOsHint, NvmeDriverValidation, ManaDriverValidation,
+          NvmeOsReference, ManaOsReference, OsReferenceChecked
 | order by Resource asc"""
     guidance = (
         "Prefer a catalogued non-NVMe v5 target. Gen1 conversion is required only "
@@ -1168,7 +1164,9 @@ def upgrade_path_panel(generation, lookups):
         "- Validate MANA hardware, driver and traffic separately; custom image origin is not proof of a missing driver.\n"
         "- Confirm local-disk capacity/performance, disk/NIC limits, quota/policy/zone/cluster availability, applications and rollback.")
     hidden = ("ResourceId", "VmGeneration", "ConversionRequired", "NvmeRequired",
-              "ImageProvenance", "OsEvidence", "EncryptionEvidence")
+              "ImageProvenance", "OsEvidence", "EncryptionEvidence", "OsHintSource",
+              "NvmeOsHint", "ManaOsHint", "NvmeDriverValidation", "ManaDriverValidation",
+              "NvmeOsReference", "ManaOsReference", "OsReferenceChecked")
     return {
         "type": 12,
         "name": f"path-v{generation}-panel",
@@ -1212,6 +1210,137 @@ def upgrade_path_panel(generation, lookups):
 # Build
 # --------------------------------------------------------------------------
 
+def discovery_items():
+    parameters = {"type": 9, "name": "discovery-parameters", "content": {
+        "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [{
+            "version": "KqlParameterItem/1.0", "name": "DiscoveryWorkload",
+            "label": "Workload signal", "type": 2, "isRequired": True, "value": "All",
+            "jsonData": json.dumps([{"value": value, "label": value} for value in (
+                "All", "AKS", "Databricks", "AVD", "SQL", "SAP", "Batch",
+                "ARO", "Managed", "Unclassified")])}]}}
+    return [
+        parameters,
+        text_item(
+            "## Workload ownership and observed evidence\n\n"
+            "Identify the owning service before choosing a resize or rebuild workflow. "
+            "**No application complexity or migration approval is inferred from a platform score.** "
+            "Owner associations, SQL registrations and SAP hints are discovery evidence, not proof "
+            "of running software, healthy HA, stateless nodes or vendor certification. Use the "
+            "table filter for resource groups and individual resources; export for full evidence.\n\n"
+            "The compute detail includes Flexible members and scale-set models: **do not sum "
+            "these rows for fleet capacity**. The quota and coverage inventories count models once. "
+            "Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace "
+            "plans are rebuild dependencies, not blanket resize blockers.\n\n"
+            "OS hints use a deliberately limited subset of the official NVMe/MANA lists, checked "
+            "18 November 2026. Other distributions/versions remain **Review**, not unsupported. "
+            "Guest metadata takes precedence over old image labels; neither proves driver or boot readiness. "
+            "Windows Server 2019 shared-disk NVMe compatibility needs separate review.",
+            "discovery-intro"),
+        arg_query(compute_evidence_query(), "discovery-compute", size=1, export=True,
+                  title="Compute ownership, migration method and observed prerequisites",
+                  grid=grid_settings(
+                      {"Name": "22ch", "Workload": "24ch", "MigrationMethod": "65ch",
+                       "CatalogueCoverage": "22ch", "ResourceGroup": "22ch"},
+                      [fmt("ResourceId", 5)] + [fmt(field, 5) for field in (
+                          "SubscriptionId", "OwnerIds", "AvdHostPoolIds", "SqlGroupIds",
+                          "NvmeOsReference", "ManaOsReference", "OsReferenceChecked",
+                          "NvmeDriverValidation", "ManaDriverValidation")], filter=True)),
+        text_item(
+            "### Independent service and configured-pool coverage\n\n"
+            "These registrations remain visible without observable backing VMs. Counts are not "
+            "additive to compute inventory. A service's location need not be its VM location. "
+            "AVD host-pool type is shown here; SQL groups do not prove active Always On membership. "
+            "Serverless/terminated Databricks compute and guest application roles are not enumerated.\n\n"
+            "Configured AKS/Batch pools are planning evidence, not running-node counts. "
+            "Zero-node and autoscaling pools can still need migration. **Autoscaler maxima, surge "
+            "and Batch demand are not automatically added to the existing Compute quota plan**; "
+            "validate those service-specific peaks separately. Empty/missing pool profiles do not "
+            "prove that the cluster has no nodes.",
+            "discovery-service-intro"),
+        arg_query(service_inventory_query(), "discovery-services", size=1, export=True,
+                  title="Services, including registrations without visible backing compute",
+                  grid=grid_settings({"Name": "28ch", "Workload": "18ch", "ResourceGroup": "24ch"},
+                                     [fmt("ResourceId", 5)], filter=True)),
+        arg_query(configured_pools_query(), "discovery-pools", size=1, export=True,
+                  title="Configured AKS / Batch pools, autoscaling and migration method",
+                  grid=grid_settings({"Service": "28ch", "Pool": "20ch", "VmSize": "22ch"},
+                                     [fmt("ResourceId", 5)], filter=True)),
+    ]
+
+
+def coverage_query():
+    return inventory_query() + """
+| extend CatalogueRecord = tostring(parse_json('{LifecycleSkuMap}')[VmSize])
+| extend CatalogueCoverage = iff(isempty(CatalogueRecord), 'Not assessed - SKU absent from captured catalogue',
+         strcat('Captured classification: ', tostring(split(CatalogueRecord, '|')[0])))
+| summarize Resources = count(), Instances = sum(Instances) by VmSize, CatalogueCoverage
+| order by CatalogueCoverage asc, Instances desc"""
+
+
+def eligibility_items(base):
+    source = arg_query(base + """
+| extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',
+         parse_json('{V5PathSkuMap}')[VmSize], parse_json('{V6PathSkuMap}')[VmSize]))
+| extend SelectedTargetSku = tostring(split(PathRecord, '|')[3]), SourceSubscriptionId = SubscriptionId,
+         SourceRegion = Region, SourceZone = Zone
+| project Name, VmSize, SelectedTargetSku, SourceRegion, SourceZone, SourceSubscriptionId, ResourceId
+| order by Name asc""", "eligibility-sources", size=1, export=True,
+        title="Select a resource to inspect its V5 or V6 target in the current subscription / region",
+        grid=grid_settings({"Name": "24ch", "VmSize": "22ch", "SelectedTargetSku": "24ch"},
+                           [fmt("ResourceId", 5)], filter=True))
+    source["content"]["exportedParameters"] = [
+        {"fieldName": field, "parameterName": parameter, "parameterType": 1}
+        for field, parameter in (("SourceSubscriptionId", "LiveSubscription"), ("SourceRegion", "LiveRegion"),
+                                 ("SelectedTargetSku", "LiveTarget"), ("SourceZone", "LiveZone"))]
+    arm = {
+        "version": "ARMEndpoint/1.0", "method": "GETARRAY", "data": None, "headers": [],
+        "path": "/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus"
+                "?api-version=2021-07-01&$filter=location eq '{LiveRegion}'",
+        "urlParams": [], "batchDisabled": False,
+        "transformers": [{"type": "jsonpath", "settings": {
+            "tablePath": "$[?(@.resourceType=='virtualMachines' && @.name=='{LiveTarget}')]",
+            "columns": [
+                {"path": path, "columnid": column} for column, path in (
+                    ("Target", "$.name"), ("Family", "$.family"), ("Locations", "$.locations"),
+                    ("LocationAndZones", "$.locationInfo"), ("Restrictions", "$.restrictions"),
+                    ("Capabilities", "$.capabilities"))]}}],
+    }
+    return [
+        text_item(
+            "## Live target eligibility inspection\n\n"
+            "Choose a path, then **select a resource row**. The read-only Compute SKU API returns "
+            "the exact catalogued target's current subscription/region record, full restriction "
+            "objects, zones and capabilities. A missing target or failed API request is **Unknown**, "
+            "not an unsupported SKU or a passed check. No row means no eligibility evidence.\n\n"
+            "Inspect each restriction's **type, reasonCode, restrictionInfo.locations and zones** "
+            "against the selected placement. A zonal restriction is not automatically a regional "
+            "block. An empty restriction list means no SKU restriction was returned, not quota, "
+            "policy, cluster-resize compatibility or physical allocation approval. Compare current "
+            "capabilities with NIC/data-disk counts in Workload discovery. Clear/reselect a resource "
+            "after changing the path; the details below always name the selected target.\n\n"
+            "Current selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, "
+            "region **{LiveRegion}**, source zone **{LiveZone}**. This inspector does not change "
+            "the captured catalogue, recommendations or prerequisite statuses.",
+            "eligibility-intro"),
+        {"type": 9, "name": "eligibility-parameters", "content": {
+            "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [{
+                "version": "KqlParameterItem/1.0", "name": "EligibilityGeneration", "type": 2,
+                "label": "Inspect upgrade path", "isRequired": True, "value": "5",
+                "jsonData": json.dumps([{"value": str(g), "label": f"V{g}"} for g in (5, 6)])}]
+            + [{"version": "KqlParameterItem/1.0", "name": name, "type": 1,
+                "value": "", "isHiddenWhenLocked": True}
+               for name in ("LiveSubscription", "LiveRegion", "LiveTarget", "LiveZone")]}},
+        source,
+        {"type": 3, "name": "eligibility-live", "conditionalVisibility": {
+            "parameterName": "LiveTarget", "comparison": "isNotEqualTo", "value": ""},
+         "content": {"version": "KqlItem/1.0", "queryType": 12, "query": json.dumps(arm),
+                     "title": "Live SKU record - inspect placement-specific restrictions; not migration approval",
+                     "size": 1, "visualization": "table", "showExportToExcel": True,
+                     "noDataMessage": "Unknown: no matching target SKU returned. Check selection, API permissions and region.",
+                     "gridSettings": grid_settings({"Target": "24ch", "Restrictions": "80ch"}, filter=True)}},
+    ]
+
+
 def build(data):
     sku_map, spec_map, url_map, tgt_regions, region_ids = build_lookups(data)
     path_lookups = {generation: build_lookups(data, path_generation=generation)
@@ -1243,7 +1372,7 @@ def build(data):
         "This workbook inventories the virtual machines and scale sets in the "
         "subscriptions you select, identifies which sizes are affected by announced "
         "Azure VM retirements and lifecycle changes, recommends a target size for each, "
-        "and scores how ready each workload is to move.\n\n"
+        "and scores captured platform compatibility, not application migration readiness.\n\n"
         "**Fork policy: v5 first.** Retirement recommendations prefer a catalogued "
         "non-NVMe v5 target that preserves architecture, CPU, memory, local disk "
         "(including known capacity) and "
@@ -1251,12 +1380,14 @@ def build(data):
         "v5 candidate exists, the newer target is explicitly marked for manual review. "
         "Optional modernization is separate from retirement remediation.\n\n"
         "V5 does not eliminate MANA, guest OS, encryption, quota or application checks. "
-        "A high score is not a migration certification.\n\n"
-        "Readiness is calculated from your **actual** fleet attributes - the real Hyper-V "
+        "A high score is not a migration certification. **100 means no scored platform penalty; "
+        "guest, application, HA, backup and rollback checks may still be Unknown.** "
+        "Use Workload discovery to identify service ownership and stateful workload evidence.\n\n"
+        "The platform score uses your **actual** fleet attributes - the real Hyper-V "
         "generation of each OS disk, the region and zone each VM runs in, and whether it "
         "sits in an availability set or scale set - not from size metadata alone.\n\n"
         "> All data stays in your tenant. The workbook runs read-only Azure Resource Graph "
-        "queries and stores nothing.",
+        "and selected-row Compute SKU API queries; it makes no resource changes.",
         "header"))
 
     items.append({
@@ -1327,6 +1458,7 @@ def build(data):
     })
 
     tabs = [("Overview", "overview"), ("Impacted resources", "impacted"),
+            ("Workload discovery", "discovery"),
             ("SQL modernization", "sql"),
             ("Upgrade paths", "paths"),
             ("Capacity / quota", "quota"),
@@ -1357,7 +1489,8 @@ def build(data):
             "paths-intro"),
         upgrade_path_panel(5, path_lookups[5]),
         upgrade_path_panel(6, path_lookups[6]),
-    ]))
+    ] + eligibility_items(base_impacted)))
+    items.append(group_item("grp-discovery", "discovery", discovery_items()))
     items.append(group_item("grp-quota", "quota", quota_planning_items(base)))
 
     # ---------------- TAB 1: Overview ----------------
@@ -1374,7 +1507,7 @@ def build(data):
 | extend Score = iff(Impacted == 0, 100, toint(round(todouble(ScoreSum) / todouble(Impacted), 0)))
 | extend SoonestDays = iff(SoonestDays == 99999, -1, SoonestDays)
 | extend M = pack_array('Impacted resources', 'Instances affected', 'Retirement announced',
-                        'End of life', 'Need prerequisite work', 'Fleet readiness score',
+                        'End of life', 'Need prerequisite work', 'Fleet platform score',
                         'Days to next retirement')
 | mv-expand Metric = M to typeof(string)
 | extend Value = case(
@@ -1383,15 +1516,15 @@ def build(data):
         Metric == 'Retirement announced', Retiring,
         Metric == 'End of life', EndOfLife,
         Metric == 'Need prerequisite work', Blocked,
-        Metric == 'Fleet readiness score', Score,
+        Metric == 'Fleet platform score', Score,
         SoonestDays)
 | extend Detail = case(
-        Metric == 'Fleet readiness score', case(Score >= 85, 'Mostly in-place resizes',
+        Metric == 'Fleet platform score', case(Score >= 85, 'Few scored differences; validation required',
                                                 Score >= 60, 'Validation needed',
                                                 Score >= 35, 'Prerequisite work required',
                                                 'Significant re-architecture'),
         Metric == 'Days to next retirement', iff(Value < 0, 'No dated retirements', 'days remaining'),
-        Metric == 'Need prerequisite work', 'readiness below 60',
+        Metric == 'Need prerequisite work', 'platform score below 60',
         'resources')
 | extend Ord = case(
         Metric == 'Impacted resources', 1,
@@ -1399,7 +1532,7 @@ def build(data):
         Metric == 'Retirement announced', 3,
         Metric == 'End of life', 4,
         Metric == 'Need prerequisite work', 5,
-        Metric == 'Fleet readiness score', 6,
+        Metric == 'Fleet platform score', 6,
         7)
 | order by Ord asc
 | project Metric, Value, Detail""",
@@ -1431,18 +1564,19 @@ def build(data):
 | order by AvgReadiness asc""",
         "ov-complexity", visualization="table", size=1, width="50",
         max_width="700px",
-        title="Migration complexity distribution",
+        title="Scored platform-change distribution - not workload complexity",
         grid=grid_settings(
             {"Complexity": "37%", "Resources": "21%", "Instances": "21%",
              "AvgReadiness": "21%"},
             [
              fmt("AvgReadiness", 8, formatOptions={"palette": "redGreen", "min": 0, "max": 100})],
-            labelSettings=[{"columnId": "AvgReadiness", "label": "Avg readiness"}])))
+            labelSettings=[{"columnId": "AvgReadiness", "label": "Avg platform score"},
+                           {"columnId": "Complexity", "label": "Scored platform changes"}])))
 
     ov.append(arg_query(
         base_impacted + """
 | summarize Instances = sum(Instances) by Series, PriceUpdate2027, RiStatus
-| where PriceUpdate2027 == 'Yes' or RiStatus != 'Not applicable'
+| where PriceUpdate2027 == 'Yes' or RiStatus startswith 'Series'
 | order by Instances desc""",
         "ov-commercial", size=1, width="50", max_width="760px",
         title="Commercial impact - pricing and reservations",
@@ -1457,14 +1591,12 @@ def build(data):
                       "text": "Not affected"}]}),
              fmt("RiStatus", 18, formatOptions={"thresholdsOptions": "colors",
                  "thresholdsGrid": [
-                     {"operator": "contains", "thresholdValue": "pay-as-you-go",
-                      "representation": "redBright", "text": "{0}{1}"},
-                     {"operator": "contains", "thresholdValue": "no renewal",
+                     {"operator": "contains", "thresholdValue": "cutoff passed",
                       "representation": "orange", "text": "{0}{1}"},
                      {"operator": "Default", "representation": "blue", "text": "{0}{1}"}]})],
             labelSettings=[
                 {"columnId": "PriceUpdate2027", "label": "Pricing update"},
-                {"columnId": "RiStatus", "label": "Reserved Instance status"},
+                {"columnId": "RiStatus", "label": "Series RI cutoff - customer coverage unverified"},
             ])))
 
     ov.append(arg_query(
@@ -1484,7 +1616,7 @@ def build(data):
             labelSettings=[{"columnId": "VmSize", "label": "Current size"},
                            {"columnId": "ActionCategory", "label": "Lifecycle status"},
                            {"columnId": "RecommendedTarget", "label": "Recommended target"},
-                           {"columnId": "AvgReadiness", "label": "Avg readiness"},
+                           {"columnId": "AvgReadiness", "label": "Avg platform score"},
                            {"columnId": "NextRetirement", "label": "Next retirement"}])))
 
     items.append(group_item("grp-overview", "overview", ov))
@@ -1494,15 +1626,16 @@ def build(data):
     imp.append(text_item(
         "### VM retirement / end of life\n"
         "Every VM and scale set whose current size carries an announced retirement or "
-        "end-of-life status. **Readiness** is scored 0-100 against your real configuration; "
-        "**Blockers** lists the prerequisite work that must happen before the move.",
+        "end-of-life status. **Platform score** is 0-100 for scored configuration differences, "
+        "not application readiness. **100 is not migration approval.** The listed checks are "
+        "not exhaustive: guest drivers, service ownership, HA, backup and rollback still need evidence.",
         "imp-intro"))
     imp.append(arg_query(
         base_impacted + """
 | where '{LifecycleFilter}' has Lifecycle
 | project Name, ResourceGroup, Region, VmSize, Instances, VmGeneration,
           RecommendedTarget, TargetInRegion, RetiresOn, ReadinessScore,
-          Blockers, ResourceId
+          Blockers, MigrationApproval, ResourceId
 | order by ReadinessScore asc, RetiresOn asc""",
         "imp-grid", size=1, export=True, title="Retiring virtual machines and scale sets",
         grid=grid_settings(
@@ -1539,7 +1672,7 @@ def build(data):
                 {"columnId": "RecommendedTarget", "label": "Recommended target"},
                 {"columnId": "TargetInRegion", "label": "In region"},
                 {"columnId": "RetiresOn", "label": "Retires on"},
-                {"columnId": "ReadinessScore", "label": "Readiness"},
+                {"columnId": "ReadinessScore", "label": "Platform score"},
             ])))
     imp.append(text_item(
         "### Potential regional price exposure\n\n"
@@ -1581,15 +1714,17 @@ def build(data):
 
     sql = [text_item(
         "## SQL modernization opportunities on retiring VMs\n\n"
-        "These **retiring/end-of-life VMs** have a SQL IaaS Agent extension identified by "
-        "publisher **Microsoft.SqlServer.Management** and handler **SqlIaaSAgent**, not by "
-        "a VM name or SQL-looking image. Each VM appears once; extension provisioning states "
-        "are shown, including failed or unknown states. Lifecycle filtering is retirement-only "
+        "These **retiring/end-of-life VMs** have SQL VM registration evidence, a SQL IaaS Agent "
+        "extension with publisher **Microsoft.SqlServer.Management** and handler **SqlIaaSAgent**, "
+        "or both. VM names and SQL-looking images alone are not evidence. Each VM appears once; "
+        "extension/registration provisioning states are retained, including failed or unknown states. "
+        "Registration edition, license type, management mode and group associations are shown. "
+        "A registered group does not verify active Always On membership or health. Filtering is retirement-only "
         "and independent of the global Lifecycle status selector.\n\n"
-        "**Discovery signal, not certification.** Extension presence does not establish that "
+        "**Discovery signal, not certification.** Extension or registration presence does not establish that "
         "SQL Server is installed, running, in use or suitable for a managed database service. "
         "A stopped VM remains an assessment candidate; its power state is shown when available. "
-        "VMs without a visible matching extension are **not proven SQL-free**. Limited permissions, "
+        "VMs without either visible signal are **not proven SQL-free**. Limited permissions, "
         "ARG indexing, registration mode and unsupported/unrecognized handlers can cause omissions. "
         "Flexible scale-set member VMs are evaluated individually here; scale-set models and "
         "Uniform instances without individual ARG VM records are not included.\n\n"
@@ -1602,7 +1737,7 @@ def build(data):
         "sql-intro")]
     sql.append(arg_query(
         sql_modernization_query(sku_map, tgt_regions, region_ids), "sql-modernization-grid",
-        size=1, export=True, title="Retiring VMs with SQL IaaS Agent extension evidence",
+        size=1, export=True, title="Retiring VMs with SQL extension and/or registration evidence",
         grid=grid_settings(
             {"Name": "20ch", "ResourceGroup": "18ch", "Region": "13ch", "VmSize": "20ch",
              "RetiresOn": "13ch", "PowerState": "12ch", "ExtensionStates": "18ch",
@@ -1665,16 +1800,16 @@ def build(data):
                 {"columnId": "RecommendedTarget", "label": "Recommended target"},
                 {"columnId": "Target", "label": "Target spec"},
                 {"columnId": "MemoryPreserving", "label": "Memory-preserving target"},
-                {"columnId": "AvgReadiness", "label": "Avg readiness"},
+                {"columnId": "AvgReadiness", "label": "Avg platform score"},
             ])))
     mapping.append(text_item(
         "#### Alternates, series notes and commercial impact\n"
         "The same sizes again, with the other targets worth evaluating, what changes at the "
         "series level, and the commercial position: whether the separate legacy-series 1 February 2027 pricing update "
-        "applies to the series, and when Reserved Instance coverage ends.\n\n"
+        "applies to the series, and the series-wide RI purchase/renewal cutoff.\n\n"
         "> Reserved Instance purchases and renewals for these series ended **1 July 2026**. "
-        "When an existing reservation expires the workload bills at pay-as-you-go rates, "
-        "**even if it is set to auto-renew** "
+        "**This is not a customer's reservation expiry date or evidence of current pay-as-you-go billing.** "
+        "Existing reservation terms, matching coverage, other discounts and billing are not inspected. "
         "([Azure update 560948](https://azure.microsoft.com/updates?id=560948)). "
         "For the rates that apply to your agreement, see the official "
         "[Windows](https://azure.microsoft.com/pricing/details/virtual-machines/windows/) and "
@@ -1706,8 +1841,8 @@ def build(data):
                 {"columnId": "SizeConsiderations", "label": "Considerations"},
                 {"columnId": "SpecNotes", "label": "Series notes"},
                 {"columnId": "PriceUpdate2027", "label": "Pricing update"},
-                {"columnId": "RiEnded", "label": "RI ends"},
-                {"columnId": "RiStatus", "label": "RI status"},
+                {"columnId": "RiEnded", "label": "Series RI purchase/renewal cutoff"},
+                {"columnId": "RiStatus", "label": "Cutoff status - coverage not assessed"},
             ])))
     items.append(group_item("grp-mapping", "mapping", mapping))
 
@@ -1773,11 +1908,12 @@ def build(data):
         "NVMe-capable; start the Gen1 conversion track in parallel because it has the longest "
         "lead time.\n\n"
         "| Wave | Scope | Why it goes here |\n| --- | --- | --- |\n"
-        "| 1 | Low complexity, confirmed non-production | Proves the runbook with no business risk |\n"
-        "| 2 | Low complexity, production or unverified | In-place resize, rollback via restore point |\n"
-        "| 3 | Medium complexity | Validate NVMe/MANA and temp-disk dependencies first |\n"
-        "| 4 | High complexity | Gen1 to Gen2 conversion, memory or region changes |\n"
-        "| 5 | Very high complexity | Re-architecture - treat as a project, not a resize |\n\n"
+        "| 1 | Few scored platform changes, non-production tag | Validate ownership and rehearse; not a no-risk claim |\n"
+        "| 2 | Few scored platform changes, production or unverified | Assess application, HA, backup and rollback before scheduling |\n"
+        "| 3 | Moderate scored platform changes | Validate NVMe/MANA and temp-disk dependencies |\n"
+        "| 4 | Substantial scored platform changes | Plan conversion, memory or region changes |\n"
+        "| 5 | Major scored platform changes | Assess redesign requirements and dependencies |\n\n"
+        "These are **platform triage suggestions**, not approved migration waves or application complexity ratings.\n\n"
         "**How environment is determined.** Most fleets do not tag every VM, so the "
         "workbook resolves environment through a cascade and reports which signal it "
         "used:\n\n"
@@ -1868,9 +2004,9 @@ def build(data):
 // unverified is sequenced as production, because the cost of being wrong is a
 // production outage during what was sold as a no-risk pilot.
 | extend Wave = case(
-        ReadinessScore >= 85 and Environment == 'Non-production', 'Wave 1 - low risk, non-production',
-        ReadinessScore >= 85, 'Wave 2 - low risk, production or unverified',
-        ReadinessScore >= 60, 'Wave 3 - validate then resize',
+        ReadinessScore >= 85 and Environment == 'Non-production', 'Wave 1 - fewer platform changes, non-production tag',
+        ReadinessScore >= 85, 'Wave 2 - fewer platform changes, production or unverified',
+        ReadinessScore >= 60, 'Wave 3 - platform validation',
         ReadinessScore >= 35, 'Wave 4 - prerequisites required',
         'Wave 5 - re-architecture')
 | summarize Resources = count(), Instances = sum(Instances),
@@ -1896,7 +2032,7 @@ def build(data):
             labelSettings=[
                 {"columnId": "EnvSource", "label": "Signal"},
                 {"columnId": "EarliestRetirement", "label": "Earliest retirement"},
-                {"columnId": "AvgReadiness", "label": "Avg readiness"},
+                {"columnId": "AvgReadiness", "label": "Avg platform score"},
                 {"columnId": "Sizes", "label": "Sizes in wave"},
             ])))
     plan.append(arg_query(
@@ -1923,7 +2059,7 @@ def build(data):
                 {"columnId": "VmSize", "label": "Current size"},
                 {"columnId": "VmGeneration", "label": "Gen"},
                 {"columnId": "RecommendedTarget", "label": "Recommended target"},
-                {"columnId": "ReadinessScore", "label": "Readiness"},
+                {"columnId": "ReadinessScore", "label": "Platform score"},
                 {"columnId": "RetiresOn", "label": "Retires on"},
                 {"columnId": "DaysToRetirement", "label": "Days left"},
                 {"columnId": "ResourceId", "label": "Portal"},
@@ -1934,7 +2070,8 @@ def build(data):
     about = []
     about.append(text_item(
         "### How this workbook works\n\n"
-        "**Data source.** Read-only Azure Resource Graph queries across the subscriptions you "
+        "**Data source.** Read-only Azure Resource Graph queries and a selected-row Compute SKU "
+        "API inspection across the subscriptions you "
         "select. Nothing is written, nothing leaves your tenant, and no agent or Log Analytics "
         "workspace is required. You need `Reader` on the subscriptions in scope.\n\n"
         "**Lifecycle status.**\n\n"
@@ -1945,8 +2082,10 @@ def build(data):
         "retirement date. Plan the migration inside the notice window. |\n"
         "| Optional modernization | Previous-generation or current-generation sizes with no "
         "announced retirement. Moving is a price-performance decision, not a compliance one. |\n\n"
-        "**Readiness score.** Every impacted resource starts at 100 and loses points for each "
-        "prerequisite that genuinely applies to it:\n\n"
+        "**Platform score (legacy export field `ReadinessScore`).** Every impacted resource starts "
+        "at 100 and loses points for scored platform differences. **100 is not migration approval**; "
+        "unknown drivers, application dependencies, HA, backup and rollback do not become passed checks. "
+        "Workload complexity is assessed separately by the application/service owner.\n\n"
         "| Factor | Penalty | Evaluated against |\n| --- | ---: | --- |\n"
         "| Arm64 architecture change | 50 | Target CPU architecture |\n"
         "| Gen1 to Gen2 conversion | 45 | **Actual `hyperVGeneration` of the OS disk** |\n"
@@ -1979,8 +2118,8 @@ def build(data):
         "**Reserved Instances.** Purchases and renewals ended **1 July 2026** for one-year "
         "reservations on Av2, Amv2, Bv1, D, Ds, Dv2, Dsv2, F, Fs, Fsv2, G, Gs, Ls and Lsv2, "
         "and for both one- and three-year reservations on Dv3, Dsv3, Ev3 and Esv3. Existing "
-        "reservations run to the end of their term; after that the usage bills at "
-        "pay-as-you-go rates **even if the reservation is set to auto-renew** "
+        "reservation terms and billing coverage are not read. The cutoff is **not the customer's "
+        "reservation expiry**, and does not establish pay-as-you-go billing or the absence of other discounts "
         "([Azure update 560948](https://azure.microsoft.com/updates?id=560948)).\n\n"
         "**Cloud coverage.** The two changes do not have the same scope:\n\n"
         "| | Azure public | 21Vianet | Sovereign / Government |\n| --- | :---: | :---: | :---: |\n"
@@ -2034,17 +2173,10 @@ def build(data):
              "Instances": "21%"},
             labelSettings=[{"columnId": "ActionCategory", "label": "Lifecycle status"}])))
     about.append(arg_query(
-        """resources
-| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'
-| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')
-| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))
-| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))
-| extend Instances = iff(IsVmss, toint(sku.capacity), 1)
-| summarize Resources = count(), Instances = sum(Instances) by VmSize
-| order by Instances desc""",
+        coverage_query(),
         "about-allsizes", size=4, width="50", max_width="560px",
-        title="All sizes in scope (including sizes with no lifecycle action)",
-        grid=grid_settings({"VmSize": "40%", "Resources": "30%", "Instances": "30%"},
+        title="All sizes in scope - explicit captured-catalogue coverage",
+        grid=grid_settings({"VmSize": "24ch", "CatalogueCoverage": "50ch", "Resources": "12ch", "Instances": "12ch"},
                            labelSettings=[{"columnId": "VmSize", "label": "Size"}])))
     items.append(group_item("grp-about", "about", about))
 

@@ -56,11 +56,14 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 23)
+        self.assertEqual(len(queries), 27)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
             if name == "about-allsizes":
-                self.assertEqual(expanded, query)
+                self.assertEqual(expanded, builder.expand_lookups(builder.coverage_query(), self.workbook))
+            elif name.startswith("discovery-"):
+                self.assertNotIn("| where isnotempty(Rec)", expanded)
+                self.assertIn("{DiscoveryWorkload}", expanded)
             elif name == "regional-price-grid":
                 self.assertEqual(expanded, builder.regional_price_query(self.data))
             elif name == "sql-modernization-grid":
@@ -117,7 +120,11 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("properties.publisher) =~ 'Microsoft.SqlServer.Management'", query)
         self.assertIn("properties.type) =~ 'SqlIaaSAgent'", query)
         self.assertIn("properties.typePropertiesType) =~ 'SqlIaaSAgent'", query)
-        self.assertIn("SqlExtensionCount = count()", query)
+        self.assertIn("SqlExtensionCount = countif(IsSqlExtension)", query)
+        self.assertIn("microsoft.sqlvirtualmachine/sqlvirtualmachines", query)
+        self.assertIn("SqlRegistrationCount = countif(IsRegistration)", query)
+        self.assertIn("SqlLicenseTypes", query)
+        self.assertIn("active HA membership/health unverified", query)
         self.assertIn("| join kind=inner", query)
         self.assertNotIn("{LifecycleFilter}", query)
         self.assertIn("does not prove SQL is running", query)
@@ -140,6 +147,72 @@ class WorkbookDeploymentTests(unittest.TestCase):
             self.assertIn("Manual selection required", query)
             self.assertIn("Custom/gallery image - verify guest drivers", query)
             self.assertNotIn("| project ReadinessScore", query)
+
+    def test_platform_score_is_not_migration_approval(self):
+        queries = []
+        walk(self.workbook, queries)
+        query = dict(queries)["imp-grid"]
+        self.assertIn("MigrationApproval = 'Not assessed", query)
+        self.assertIn("Few scored platform changes - validation required", query)
+        self.assertNotIn("Low - in-place resize", query)
+        self.assertNotIn("low risk", dict(queries)["plan-waves"])
+
+    def test_series_ri_cutoff_never_claims_customer_expiry_or_billing(self):
+        queries = []
+        walk(self.workbook, queries)
+        for name, query in queries:
+            self.assertNotIn("Expired - billing at pay-as-you-go", query, name)
+        query = dict(queries)["map-detail"]
+        self.assertIn("Series purchase/renewal cutoff passed; coverage not assessed", query)
+
+    def test_coverage_retains_unmapped_and_counts_flexible_models_once(self):
+        query = builder.coverage_query()
+        self.assertIn("Not assessed - SKU absent", query)
+        self.assertNotIn("| where isnotempty(Rec)", query)
+        self.assertIn("IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))", query)
+
+    def test_sql_evidence_has_registration_and_exact_extension_identity(self):
+        query = builder.sql_evidence_query()
+        self.assertIn("properties.virtualMachineResourceId", query)
+        self.assertIn("properties.publisher) =~ 'Microsoft.SqlServer.Management'", query)
+        self.assertIn("properties.typePropertiesType) =~ 'SqlIaaSAgent'", query)
+        self.assertIn("by VmId", query)
+        self.assertNotIn("| where ExtensionState", query)
+
+    def test_discovery_separates_observations_from_readiness(self):
+        query = builder.compute_evidence_query()
+        for field in ("ExpectedNics", "DataDiskCount", "SharedDiskEvidence", "Hibernation",
+                      "SecurityType", "SystemAssignedIdentity", "MarketplacePlan", "InventoryRole"):
+            self.assertIn(field, query)
+        self.assertIn("Unknown - incomplete NIC evidence", query)
+        self.assertIn("Unknown - incomplete attached-disk evidence", query)
+        self.assertIn("desktopvirtualizationresources", query)
+        self.assertIn("nodeResourceGroup", query)
+        self.assertIn("managedResourceGroupId", query)
+        self.assertIn("Multiple owner associations", query)
+        self.assertIn("Not assessed - application", query)
+
+    def test_os_hints_never_claim_driver_validation(self):
+        query = builder.os_eligibility_query()
+        self.assertIn("iff(isnotempty(GuestOsName), GuestOsName", query)
+        self.assertIn("not classified by captured subset", query)
+        self.assertIn("Unknown - guest driver and target boot not tested", query)
+        self.assertIn("Unknown - target hardware, driver and traffic not tested", query)
+        self.assertNotIn("'TRUE'", query)
+
+    def test_live_eligibility_is_exact_target_read_only_and_unknown_without_data(self):
+        group = next(i for i in self.workbook["items"] if i["name"] == "grp-paths")
+        live = next(i for i in group["content"]["items"] if i["name"] == "eligibility-live")
+        source = next(i for i in group["content"]["items"] if i["name"] == "eligibility-sources")
+        request = json.loads(live["content"]["query"])
+        self.assertEqual(request["method"], "GETARRAY")
+        self.assertIn("@.name=='{LiveTarget}'", request["transformers"][0]["settings"]["tablePath"])
+        self.assertIn("$.restrictions", [c["path"] for c in request["transformers"][0]["settings"]["columns"]])
+        self.assertTrue(live["content"]["noDataMessage"].startswith("Unknown:"))
+        self.assertEqual(live["conditionalVisibility"]["parameterName"], "LiveTarget")
+        self.assertEqual(len(source["content"]["exportedParameters"]), 4)
+        self.assertIn("{V5PathSkuMap}", source["content"]["query"])
+        self.assertIn("{V6PathSkuMap}", source["content"]["query"])
 
     def test_prerequisite_statuses_preserve_explicit_unknowns(self):
         queries = []

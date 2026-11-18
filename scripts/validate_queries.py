@@ -19,6 +19,8 @@ SUBSTITUTIONS = {
     "{LifecycleFilter}": "RETIRE,EOL,OPTIONAL",
     "{QuotaScope}": "selected",
     "{QuotaMigrationMode}": "sidebyside",
+    "{DiscoveryWorkload}": "All",
+    "{EligibilityGeneration}": "5",
 }
 
 def azure_json(arguments):
@@ -108,6 +110,15 @@ def structure_check(wb):
     def check_scope(node):
         if isinstance(node, dict):
             c = node.get("content", {})
+            if isinstance(c, dict) and c.get("queryType") == 12:
+                request = json.loads(c["query"])
+                if request.get("method") != "GETARRAY" or request.get("version") != "ARMEndpoint/1.0":
+                    problems.append(f"{node.get('name')}: live eligibility must be a read-only ARM array request")
+                if request.get("path") != (
+                    "/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus"
+                    "?api-version=2021-07-01&$filter=location eq '{LiveRegion}'"
+                ):
+                    problems.append(f"{node.get('name')}: unexpected live eligibility endpoint/scope")
             if isinstance(c, dict) and c.get("queryType") == 1:
                 expected = ["{QuotaAllSubscriptions}"] if node.get("name", "").startswith("quota-") else ["{Subscriptions}"]
                 if c.get("crossComponentResources") != expected:
@@ -132,6 +143,8 @@ def main():
     parser.add_argument("--subscription", help="Live query scope; defaults to the current CLI subscription.")
     parser.add_argument("--quota-scope", choices=("selected", "tenant"), default="selected")
     parser.add_argument("--migration-mode", choices=("sidebyside", "inplace"), default="sidebyside")
+    parser.add_argument("--query", action="append", dest="query_names",
+                        help="Validate only these named ARG queries; repeat for related queries.")
     args = parser.parse_args()
     wb = json.load(open(WB, encoding="utf-8"))
 
@@ -159,6 +172,11 @@ def main():
 
     queries = []
     walk(wb, queries)
+    if args.query_names:
+        missing = set(args.query_names) - {name for name, _ in queries}
+        if missing:
+            parser.error(f"Unknown query names: {', '.join(sorted(missing))}")
+        queries = [(name, q) for name, q in queries if name in args.query_names]
     print(f"\nFound {len(queries)} Azure Resource Graph queries\n")
 
     subscription = args.subscription or azure_json(["account", "show"])["id"]
@@ -186,7 +204,7 @@ def main():
             else:
                 failures += 1
                 err = (r.stderr or r.stdout).strip().splitlines()
-                msg = " | ".join(x.strip() for x in err if x.strip())[:400]
+                msg = " | ".join(x.strip() for x in err if x.strip())
                 print(f"  FAIL  {name:<18} {msg}")
         finally:
             os.unlink(path)

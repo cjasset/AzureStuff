@@ -4,8 +4,11 @@
 
 A self-service Azure Monitor Workbook that inventories your VM fleet,
 flags every size affected by announced Azure VM retirements and lifecycle changes,
-recommends a target size for each, scores migration readiness against the fleet's
-**actual** configuration, and lists the prerequisite work each move requires.
+recommends a target size for each, scores platform compatibility against the fleet's
+**actual** configuration, and separates observed prerequisites from unverified migration readiness.
+
+**A score of 100 is not migration approval.** It means no scored platform penalty;
+guest drivers, application dependencies, HA, backup and rollback may still be unverified.
 
 Modelled on the Azure Advisor *Service Retirement* workbook, but VM-specific and
 with target mapping plus readiness scoring that Advisor does not provide.
@@ -50,15 +53,56 @@ Gen1 VMs, one Gen2 VM and one v3 end-of-life VM.</sub>
 
 | Tab | Contents |
 | --- | --- |
-| **Overview** | Fleet summary tiles (impacted resources, instances, retirement vs end-of-life split, count needing prerequisite work, fleet readiness score, days to next retirement), urgency and actual-VM-generation donuts, complexity breakdown, commercial impact (pricing update and Reserved Instance status), top affected sizes |
+| **Overview** | Fleet summary, platform-only scores and change bands, urgency, actual VM generation, series-wide commercial signals and top affected sizes; not application complexity or migration approval |
 | **Impacted resources** | Two independent sections: retirement/end-of-life candidates with upgrade prerequisites, and potential regional price exposure (including reported exclusions and source/scope caveats) |
-| **SQL modernization** | Retiring/end-of-life VMs with SQL IaaS Agent extension evidence, provisioning/power states and an assessment checklist; extension presence is not proof of SQL runtime or managed-service suitability |
-| **Upgrade paths** | Side-by-side V5 and V6 panels, independently selected targets and a separate four-state status column for each prerequisite |
+| **Workload discovery** | Evidence-based compute ownership, service-specific migration methods, NIC/disk/security/persistence observations, independent service registrations and configured AKS/Batch pools |
+| **SQL modernization** | Retiring VMs with exact SQL IaaS extension and/or SQL VM registration evidence, provisioning/power states, edition/licensing/management/group metadata; runtime and HA remain unverified |
+| **Upgrade paths** | Side-by-side V5/V6 prerequisites plus a selected-row live Compute SKU API inspector for exact target restrictions, zones and capabilities |
 | **Capacity / quota** | Compact total/per-subscription current cores, target cores, signed delta and quota status; selectable tenant scope, automatic quota checks and optional headroom detail |
-| **Target mapping** | Two grids. *Recommended targets*: current spec, recommended target, memory-preserving alternative, retirement date — the size name links to the announcement. *Alternates, series detail and commercial impact*: up to three alternates, size-level considerations, series spec deltas, whether the 1 Feb 2027 pricing update applies, and when Reserved Instance coverage ends |
+| **Target mapping** | Recommended/alternate targets, specifications, retirement dates and series-wide commercial cutoffs; customer reservation expiry and billing coverage are not inspected |
 | **Prerequisites** | Prerequisites triggered by *this* fleet, ranked Blocking / Validate / Plan, with what to do, why it matters, how to do it and a docs link, plus the count of affected resources and the sizes involved |
 | **Migration plan** | Five suggested waves, a burn-down by retirement quarter, and the long-pole workloads to start first |
-| **About** | Methodology, the full readiness scoring table, caveats and references |
+| **About** | Methodology, platform scoring, explicit mapped/unassessed SKU coverage, caveats and references |
+
+### Workload discovery and live eligibility
+
+Compute associations use AKS node resource groups, Databricks/managed-application
+managed resource groups, resource-group `managedBy`, and AVD session-host VM links.
+SQL registration/extension and SAP extension/image/license signals are kept separate
+from proof of running software. Multiple owner associations require review.
+Unclassified compute is **not assumed stateless or low complexity**.
+
+NIC configuration/counts, shared disks, ephemeral/unmanaged disks, hibernation,
+security type, system-assigned identity and Marketplace plans identify assessment
+or rebuild dependencies, not blanket resize blockers. Incomplete NIC/disk
+visibility stays Unknown. Flexible member details and service/pool registrations
+must **not** be summed with model capacity.
+
+Independent service inventory retains services with no visible backing VMs.
+AVD host-pool type and configured AKS/Batch pool demand are exposed. Autoscaler
+maxima, surge, Batch service quotas and transient/serverless compute are **not**
+automatically incorporated into the existing Compute VM/VMSS quota calculation.
+
+OS eligibility hints use a deliberately limited subset of the official
+[NVMe image list](https://learn.microsoft.com/azure/virtual-machines/enable-nvme-interface)
+and [MANA OS/kernel guidance](https://learn.microsoft.com/azure/virtual-network/accelerated-networking-overview),
+checked 18 November 2026. Other versions/distributions remain Review, not unsupported.
+Observed guest OS takes precedence over image labels. Hints never mark boot,
+driver or traffic validation Met. Windows Server 2019 shared-disk NVMe compatibility
+requires separate review.
+
+In **Upgrade paths**, choose V5/V6 and select a source row to inspect the exact
+target's live subscription/current-region Compute SKU record. Full restriction
+objects preserve type, reason, location and zone scope. Missing data or API
+failure is Unknown, not a passed check or proof of unavailability. No SKU
+restriction does not mean sufficient quota, policy approval or allocation capacity.
+This inspector does not overwrite catalogue recommendations or prerequisite statuses.
+Per-resource quota prerequisites remain Unknown: the separate quota tab evaluates
+the default V5-first fleet model, not an arbitrary V6 path.
+
+The About coverage table explicitly retains SKUs outside the captured catalogue
+as **Not assessed**. Absence from the impacted table does not establish that an
+unmapped resource is unaffected.
 
 ### Impacted resources
 
@@ -87,16 +131,18 @@ v7 exclusions, not every v7 family. Storage meters are not inventoried here.
 ### SQL modernization
 
 The separate tab identifies retiring/end-of-life **VMs**, not SQL-looking names or
-Marketplace images, joined to VM extension resources by normalized parent VM ID.
-Detection requires publisher `Microsoft.SqlServer.Management` and handler
-`SqlIaaSAgent` (either ARG handler-property representation). Multiple matching
-extensions are aggregated to one VM row with provisioning states preserved.
+Marketplace images, joined by normalized VM ID to SQL VM registrations and/or
+VM extension resources. Extension detection requires publisher
+`Microsoft.SqlServer.Management` and handler `SqlIaaSAgent` (either ARG
+handler-property representation). Both signals are aggregated to one VM row,
+with registration/extension states, edition, license type, management mode and
+group IDs preserved. Group registration does not prove active HA membership/health.
 Stopped VMs and failed/unknown extension states remain assessment signals.
 
 Flexible scale-set member VMs are evaluated individually for SQL discovery; the
 scale-set model is not counted again. Uniform instances without individual ARG
 VM/extension records are outside this query's coverage. Absence of a matching
-extension is **not proof SQL is absent**; permissions and ARG indexing also affect
+extension or registration is **not proof SQL is absent**; permissions and ARG indexing also affect
 coverage. The tab includes all retiring/end-of-life matches independently of the
 global Lifecycle status selector.
 
@@ -237,7 +283,7 @@ The Gen1-to-Gen2 conversion is the long pole and is surfaced as blocking.
 
 ![About tab](docs/images/about.png)
 
-## Why the readiness score is meaningful
+## Interpreting the platform score
 
 Most retirement tooling scores the **size**. This scores the **fleet**.
 
@@ -266,8 +312,11 @@ and **35** on Gen1 VMs.
 | Availability set membership | 5 | Cluster-pinned resize constraint |
 | Scale set | 5 | Model-level SKU change |
 
-Bands: 85+ in-place resize, 60-84 validate then resize, 35-59 prerequisites
-required, under 35 re-architecture.
+Bands describe few (85+), moderate (60-84), substantial (35-59) or major
+(under 35) **scored platform changes**, not application migration complexity.
+The exported `ReadinessScore` field is retained for compatibility. Unknown
+prerequisites do not become passed checks at 100. Suggested migration waves
+remain platform triage suggestions requiring workload-owner approval.
 
 ---
 
@@ -360,7 +409,7 @@ The first row is the dangerous one: a production VM sequenced into wave 1.
 ## The queries
 
 Every Azure Resource Graph query the workbook runs is documented verbatim in
-[`docs/QUERIES.md`](docs/QUERIES.md) - 23 read-only ARG queries, with the shared base
+[`docs/QUERIES.md`](docs/QUERIES.md) - 27 read-only ARG queries plus the selected-row ARM SKU inspector, with the shared base
 pipeline shown once and each per-tab tail alongside it. Nothing is hidden: you
 can audit exactly what executes against your tenant before you deploy.
 
@@ -441,10 +490,18 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # all 23 live queries in the current CLI subscription
+python scripts/validate_queries.py    # all 27 live ARG queries in the current CLI subscription
 # Optional quota scope / migration approach (CLI authorization scope remains --subscription):
 # python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace
 ```
+
+The workload-discovery release uses an explicitly limited **metadata/API validation**
+scope: 33 offline tests, all 27 live ARG queries, quota and pricing/SQL boundary
+fixtures, workload-discovery fixtures and exact live target-SKU records. Fresh
+SQL guest-runtime verification was not completed because the SQL lab VM's guest
+agent did not report readiness after startup. Portal visual verification was
+also not completed. SQL detection remains an assessment signal, not proof of a
+running SQL service or application migration readiness.
 
 `build_workbook.py` writes four files: the workbook and ARM template under
 `out/` for local iteration, and published copies at `workbook/azuredeploy.json`
@@ -456,7 +513,7 @@ Without `--offline`, `validate_queries.py` needs `az login` and the
 `resource-graph` CLI extension. It
 verifies that tab links match group visibility conditions, that every query is
 scoped to `{Subscriptions}` and references only declared parameters, and that all
-23 Resource Graph queries execute successfully. Live CLI validation is limited
+27 Resource Graph queries execute successfully. Live CLI validation is limited
 to the current or explicitly supplied subscription; the workbook's tenant scope
 uses the portal's readable subscriptions. Quota queries join indexed quota records
 automatically, without selected-row parameters or per-family ARM requests. Azure Resource Graph throttles
@@ -496,7 +553,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 23 queries while keeping the saved workbook below
+628-size catalogue and all 27 ARG queries while keeping the saved workbook below
 1 MB. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
 
@@ -540,6 +597,10 @@ Included: announced retirement dates and migration targets; the v3
 a neutral flag naming the size series in scope for the 1 February 2027 pricing
 update; and the Reserved Instance purchase and renewal end date of 1 July 2026
 ([Azure update 560948](https://azure.microsoft.com/updates?id=560948)).
+
+That is a **series-wide purchase/renewal cutoff**, not a customer's reservation
+expiry. The workbook does not read reservation terms, matching coverage, other
+discounts or billing, and does not infer that a VM now bills at pay-as-you-go rates.
 
 For the **legacy-series update**, deliberately excluded: the rate-change percentage. That increase is scoped by
 size series, and the applicable figures depend on your agreement and reach each
