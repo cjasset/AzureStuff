@@ -79,6 +79,18 @@ DESCRIPTIONS = {
 }
 
 BAG = re.compile(r"parse_json\('\{.*?\}'\)", re.S)
+WORKFLOW_SECTIONS = {
+    "Overview": "Inventory - Fleet overview",
+    "Impacted resources": "Inventory - Retirement and pricing",
+    "Workload discovery": "Inventory - Workloads and owners",
+    "About": "Inventory - Catalogue coverage",
+    "Upgrade paths": "Assess - V5 and V6 paths",
+    "Prerequisites": "Assess - Required actions",
+    "SQL modernization": "Assess - SQL opportunities",
+    "Capacity / quota": "Plan - Capacity and quota",
+    "Target mapping": "Plan - Target specifications",
+    "Migration plan": "Plan - Suggested waves",
+}
 
 
 def elide(query):
@@ -126,6 +138,7 @@ def main():
     by_tab = {}
     for name, content in queries:
         tab, desc = DESCRIPTIONS.get(name, ("Other", ""))
+        tab = WORKFLOW_SECTIONS.get(tab, tab)
         body = elided[name]
         if name != "about-allsizes" and body.strip().startswith(prefix_text):
             body = body.strip()[len(prefix_text):].strip()
@@ -144,7 +157,7 @@ def main():
         "all readable subscriptions in the current tenant and apply their separate "
         "planning-scope dropdown; the headroom view uses tenant-wide candidates.",
         "",
-        "The Upgrade paths tab also has one **read-only ARM GETARRAY** inspector for "
+        "Assess > V5 / V6 paths also has one **read-only ARM GETARRAY** inspector for "
         "`/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus`, API version "
         "`2021-07-01`, filtered to `{LiveRegion}`. Its JSONPath selects the exact "
         "`{LiveTarget}` and preserves full restrictions, location/zone information and capabilities. "
@@ -162,9 +175,7 @@ def main():
         "",
         "- [The shared base query](#the-shared-base-query)",
     ]
-    order = ["Overview", "Impacted resources", "Workload discovery", "SQL modernization", "Upgrade paths",
-             "Capacity / quota", "Target mapping", "Prerequisites",
-             "Migration plan", "About", "Other"]
+    order = list(WORKFLOW_SECTIONS.values()) + ["Other"]
     tabs = [t for t in order if t in by_tab]
     for tab in tabs:
         anchor = tab.lower().replace(" ", "-")

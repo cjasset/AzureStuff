@@ -43,29 +43,39 @@ def walk(node, found):
             walk(v, found)
 
 
+def walk_items(items):
+    for item in items:
+        yield item
+        yield from walk_items(item.get("content", {}).get("items", []))
+
+
 def structure_check(wb):
     """Offline structural checks on the workbook JSON."""
     problems = []
     items = wb.get("items", [])
 
-    links = [i for i in items if i.get("type") == 11]
-    tab_keys = set()
+    all_items = list(walk_items(items))
+    links = [i for i in all_items if i.get("type") == 11]
+    destinations = set()
     for l in links:
         for link in l["content"]["links"]:
-            tab_keys.add(link["subTarget"])
+            destinations.add((link.get("cellValue"), link["subTarget"]))
             if link.get("linkTarget") != "parameter":
                 problems.append(f"link {link.get('linkLabel')} is not a parameter link")
 
-    groups = [i for i in items if i.get("type") == 12]
-    vis_values = set()
+    navigation_parameters = {parameter for parameter, _ in destinations}
+    groups = [i for i in all_items if i.get("type") == 12 and i.get("conditionalVisibility")]
+    visibility = set()
     for g in groups:
-        cv = g.get("conditionalVisibility") or {}
-        vis_values.add(cv.get("value"))
-        if cv.get("parameterName") != "SelectedTab":
-            problems.append(f"group {g.get('name')} keys off {cv.get('parameterName')}")
+        cv = g["conditionalVisibility"]
+        if cv.get("parameterName") in navigation_parameters:
+            visibility.add((cv["parameterName"], cv.get("value")))
 
-    if tab_keys != vis_values:
-        problems.append(f"tab/group mismatch: tabs={sorted(tab_keys)} groups={sorted(vis_values)}")
+    if destinations != visibility:
+        problems.append("navigation/group mismatch: every destination must select an existing stage/report")
+    for group in (i for i in items if i.get("type") == 12):
+        if group.get("conditionalVisibility", {}).get("parameterName") != "WorkflowStage":
+            problems.append(f"top-level group {group.get('name')} must be a workflow stage")
 
     params = []
     def collect_parameters(node):
@@ -80,6 +90,11 @@ def structure_check(wb):
             for value in node:
                 collect_parameters(value)
     collect_parameters(wb)
+    declared = {p["name"]: p for item in all_items if item.get("type") == 9
+                for p in item["content"].get("parameters", [])}
+    for parameter in navigation_parameters:
+        if parameter not in declared or (parameter, declared[parameter].get("value")) not in destinations:
+            problems.append(f"navigation parameter {parameter} has no valid default")
     for required in ("Subscriptions", "LifecycleFilter"):
         if required not in params:
             problems.append(f"missing parameter {required}")
@@ -93,7 +108,7 @@ def structure_check(wb):
     # Every ARG query must be scoped and must not reference undefined parameters.
     found = []
     walk(wb, found)
-    known = set(params) | {"SelectedTab"}
+    known = set(params)
     import re
     for name, q in found:
         for ref in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", q):

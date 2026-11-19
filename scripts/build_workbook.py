@@ -17,6 +17,7 @@ not contractual rates or a bill forecast.
 
 import json
 import os
+import uuid
 
 from workload_evidence import (compute_evidence_query, configured_pools_query,
                                os_eligibility_query, service_inventory_query,
@@ -958,6 +959,13 @@ def arg_query(query, name, visualization="table", size=0, title=None,
         "resourceType": "microsoft.resourcegraph/resources",
         "crossComponentResources": ["{Subscriptions}"],
         "visualization": visualization,
+        "noDataMessage": (
+            "No matching SQL registration/extension evidence for retiring VMs in this scope. "
+            "This does not prove SQL is absent. Check subscription access and workload inventory."
+            if name == "sql-modernization-grid" else
+            "No matching rows in the selected scope and filters. Check subscription access, "
+            "filters and catalogue coverage; an empty result is not migration approval."
+        ),
     }
     if title:
         content["title"] = title
@@ -1047,10 +1055,212 @@ def group_item(name, tab_value, items):
         "type": 12,
         "content": {"version": "NotebookGroup/1.0", "groupType": "editable",
                     "items": items},
-        "conditionalVisibility": {"parameterName": "SelectedTab", "comparison": "isEqualTo",
+        "conditionalVisibility": {"parameterName": "WorkflowStage", "comparison": "isEqualTo",
                                   "value": tab_value},
         "name": name,
     }
+
+WORKFLOW_STAGES = [
+    ("Start here", "start"), ("1. Inventory", "inventory"), ("2. Assess", "assess"),
+    ("3. Plan", "planning"), ("4. Migrate & validate", "migrate"),
+    ("Methodology & references", "about"),
+]
+WORKFLOW_REPORTS = {
+    "inventory": ("InventoryView", [
+        ("Fleet overview", "overview"), ("Retirement & pricing", "impacted"),
+        ("Workloads & owners", "discovery"), ("Catalogue coverage", "coverage")]),
+    "assess": ("AssessView", [
+        ("V5 / V6 paths", "paths"), ("Required actions", "prereq"),
+        ("SQL opportunities", "sql")]),
+    "planning": ("PlanView", [
+        ("Capacity & quota", "quota"), ("Target specifications", "mapping"),
+        ("Suggested waves", "plan")]),
+}
+WORKFLOW_GUIDANCE = {
+    "start": (
+        "Start here",
+        "Turn fleet evidence into a customer-owned migration plan.",
+        "Select the subscriptions above. Start with retirement/end-of-life scope; add optional "
+        "modernization only when you want to explore it. Open each numbered stage in order, or "
+        "return directly to a stage when you already know your next task.",
+        "Confirm Reader access to every intended subscription, an accountable workload owner, "
+        "and the reason for acting: retirement, pricing exposure or optional modernization.",
+        "A scoped inventory and a shared understanding of what the workbook can and cannot prove.",
+    ),
+    "inventory": (
+        "1. Inventory - what do I have, and why should I act?",
+        "Identify affected resources, workload owners and gaps in coverage.",
+        "Review the fleet overview, separate retirement from regional pricing exposure, identify "
+        "service ownership, and inspect Catalogue coverage for sizes not assessed by the captured map.",
+        "Export an affected-workload list, confirm scope and deadlines, and assign owners to "
+        "unmapped SKUs and resources with missing or conflicting ownership signals.",
+        "An owned workload list. Zero retirement rows does not rule out pricing exposure or unassessed SKUs.",
+    ),
+    "assess": (
+        "2. Assess - what could prevent a successful migration?",
+        "Choose a candidate path and identify prerequisite work and missing evidence.",
+        "Review V5 first, compare V6 where justified, and inspect the exact selected target's live "
+        "restrictions. Review Required actions and SQL opportunities with the workload owner. "
+        "Export the detailed grids only when you need the full evidence columns.",
+        "Record a preferred target and migration method. Resolve Not met checks and assign every "
+        "Unknown check an owner, evidence requirement and decision date.",
+        "A candidate path and assessment backlog, not migration approval. Met is evidence for one "
+        "check; Unknown is not a pass; Not applicable does not imply overall readiness.",
+    ),
+    "planning": (
+        "3. Plan - what resources and sequencing will I need?",
+        "Create a feasible, owner-approved plan for quota, remediation, pilots and waves.",
+        "Compare side-by-side and in-place demand, check every subscription/region/family constraint, "
+        "review target specifications, and adapt suggested waves to application dependencies.",
+        "Confirm target eligibility and actual capacity separately, request quota where needed, "
+        "schedule prerequisite work, and agree pilot, downtime, backup and rollback plans.",
+        "An execution plan. Quota headroom is not physical capacity or transferable quota; the "
+        "quota model uses default V5-first targets, not an arbitrary V6 selection or managed-pool peak.",
+    ),
+    "migrate": (
+        "4. Migrate & validate - how do I execute safely?",
+        "Use an approved service-specific runbook, then validate the workload and close out the source.",
+        "Work through the checklist below with the application and platform owners. Execute changes "
+        "outside this read-only workbook using your approved deployment and change-management tools.",
+        "Obtain explicit owner acceptance of application, performance, resilience and rollback "
+        "evidence before expanding a wave or deleting old resources.",
+        "A customer-maintained execution and acceptance record. This workbook does not execute "
+        "migrations, track completion, or certify application readiness.",
+    ),
+    "about": (
+        "Methodology & references",
+        "Understand data sources, scoring, coverage and limitations.",
+        "Review the scoring model and references before interpreting a flag. Return to Inventory > "
+        "Catalogue coverage to see mapped versus unassessed sizes in your scope.",
+        "Confirm that assumptions, cloud applicability and evidence quality match your environment.",
+        "Transparent interpretation, not a supportability or migration certification.",
+    ),
+}
+
+
+def navigation_item(name, parameter, options, style="tabs"):
+    return {
+        "type": 11, "name": name,
+        "content": {
+            "version": "LinkItem/1.0", "style": style,
+            "links": [
+                {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{name}:{key}")),
+                 "cellValue": parameter, "linkTarget": "parameter", "linkLabel": label,
+                 "subTarget": key, "preText": "",
+                 "style": "primary" if style == "paragraph" and label.startswith(("Next:", "Recheck:")) else "link"}
+                for label, key in options
+            ],
+        },
+    }
+
+
+def workflow_layout(items):
+    reports = {item["conditionalVisibility"]["value"]: item
+               for item in items if item.get("type") == 12}
+    header = next(item for item in items if item["name"] == "header")
+    reports["about"]["content"]["items"].insert(0, text_item(
+        "### Scope and recommendation policy\n\n" + header["content"]["json"].split("\n\n", 1)[1],
+        "workflow-policy"))
+    header["content"]["json"] = (
+        f"# {WORKBOOK_TITLE}\n\n"
+        "Follow **Inventory > Assess > Plan > Migrate & validate** to turn fleet evidence "
+        "into an owner-approved plan. Start below, or select a stage to continue.\n\n"
+        "**Read-only:** this workbook makes no resource changes. "
+        "**A platform score is not migration approval.**")
+    coverage = [item for item in reports["about"]["content"]["items"] if item.get("type") == 3]
+    reports["about"]["content"]["items"] = [
+        item for item in reports["about"]["content"]["items"] if item.get("type") != 3]
+    reports["coverage"] = group_item("grp-coverage", "coverage", [
+        text_item("### Check what was not assessed\n\n"
+                  "Sizes absent from the captured catalogue are **unassessed**, not approved or "
+                  "necessarily retiring. Assign an owner to research their lifecycle and target path. "
+                  "The all-sizes grid includes optional sizes independently of the lifecycle filter.",
+                  "coverage-intro"),
+        *coverage,
+    ])
+    result = [item for item in items if item.get("type") != 12]
+    for index, (label, key) in enumerate(WORKFLOW_STAGES):
+        title, goal, actions, checkpoint, outcome = WORKFLOW_GUIDANCE[key]
+        stage_items = [text_item(
+            f"## {title}\n\n**Goal:** {goal}\n\n**What to do:** {actions}\n\n"
+            f"**Before moving on:** {checkpoint}\n\n**Outcome / interpretation:** {outcome}",
+            f"workflow-guide-{key}")]
+        if key == "start":
+            stage_items.append(text_item(
+                "| Stage | Question | Take away |\n| --- | --- | --- |\n"
+                "| 1. Inventory | What do I have, and why act? | A scoped workload list with owners |\n"
+                "| 2. Assess | What could block the path? | Candidate targets and an evidence backlog |\n"
+                "| 3. Plan | What resources and sequencing are needed? | Quota actions, pilots and waves |\n"
+                "| 4. Migrate & validate | How do I execute and accept it? | A runbook and acceptance checklist |\n\n"
+                "**Read this first.** V5-first recommendations preserve captured platform capabilities; "
+                "V5 still needs guest OS, NVMe/MANA where applicable, encryption, application and quota checks. "
+                "**100 means no scored platform penalty, not migration approval.**\n\n"
+                "**Scope matters.** Lifecycle filters apply to fleet assessment, but regional pricing, "
+                "SQL retirement detection and independent discovery/coverage have their own documented scope. "
+                "The Plan quota scope can include all readable tenant subscriptions; it cannot reveal "
+                "inaccessible subscriptions or pool their quota.\n\n"
+                "**Evidence, not an all-clear.** Missing permissions or metadata, empty results and query "
+                "errors must be investigated. SQL evidence does not prove runtime or HA health. "
+                "Use the export buttons to maintain decisions, owners and approvals in your own tracker. "
+                "This workbook does not save a completion state.",
+                "workflow-start-map"))
+        elif key in WORKFLOW_REPORTS:
+            parameter, options = WORKFLOW_REPORTS[key]
+            stage_items.append(navigation_item(f"workflow-views-{key}", parameter, options))
+            for _, report in options:
+                reports[report]["conditionalVisibility"]["parameterName"] = parameter
+                stage_items.append(reports[report])
+        elif key == "about":
+            stage_items.extend(reports["about"]["content"]["items"])
+        elif key == "migrate":
+            stage_items.append(text_item(
+                "### Execution and acceptance checklist\n\n"
+                "| When | Customer action | Evidence / decision to record outside the workbook |\n"
+                "| --- | --- | --- |\n"
+                "| Before a pilot | Confirm owner, service dependencies, licensing, supportability and target eligibility | Owner-approved target and method; resolved or explicitly accepted unknowns |\n"
+                "| Before a pilot | Test backup/restore and rollback; agree triggers, downtime and recovery objectives | A rehearsed recovery plan and go/no-go authority |\n"
+                "| Pilot | Use a representative approved non-production workload where possible | Baseline CPU, memory, disk/network latency and application health |\n"
+                "| Execute | Follow the supported VM, VMSS or managed-service runbook | Change record, migration logs and boot/driver/encryption evidence |\n"
+                "| Validate | Test application transactions, performance, monitoring, HA/failover and backup | Compare with baseline and obtain application-owner acceptance |\n"
+                "| Expand waves | Recheck restrictions, quota and actual capacity before each wave | Approved schedule; pause or roll back when agreed thresholds fail |\n"
+                "| Close out | Retain recovery resources for the approved period, then retire only confirmed unused sources | Owner approval, inventory reconciliation and updated cost/licensing records |\n\n"
+                "### Use the workload's supported migration method\n\n"
+                "- **Standalone VMs:** choose supported resize versus rebuild/migrate after assessing generation, "
+                "storage, encryption and application constraints. See the "
+                "[VM modernization guide](https://learn.microsoft.com/azure/virtual-machines/sizes/lifecycle/retirement/retired-sizes-modernization-guide).\n"
+                "- **VM scale sets:** use model-level changes and a tested rolling/instance replacement strategy; "
+                "validate instance health and orchestration behavior. See "
+                "[VMSS upgrade policies](https://learn.microsoft.com/azure/virtual-machine-scale-sets/virtual-machine-scale-sets-upgrade-policy).\n"
+                "- **AKS:** migrate through supported node-pool operations, with pod disruption, drain, storage "
+                "and surge planning. **Do not resize managed backing VMs individually.** See "
+                "[AKS node-pool resizing](https://learn.microsoft.com/azure/aks/resize-node-pool).\n"
+                "- **Other managed services:** follow the owning service's pool/workspace/host migration process. "
+                "Ownership conflicts require investigation before changing backing compute.\n"
+                "- **SQL / SAP / stateful workloads:** engage application and database owners for licensing, "
+                "data consistency, HA, backup/restore and vendor support. SQL registrations are opportunity "
+                "signals, not automatic recommendations to move to a managed database.\n\n"
+                "### Recheck and reconcile\n\n"
+                "Refresh Inventory after changes and compare exports from the same scope. "
+                "A resource disappearing from a retirement grid is **not proof of migration success**: "
+                "it may have moved scope, changed size, been deleted, or become inaccessible. Confirm the "
+                "destination, workload acceptance and source disposition independently.",
+                "workflow-execution-checklist"))
+        destinations = []
+        if key == "about":
+            destinations.append(("Return: Start here", "start"))
+        elif index > 0:
+            previous_label, previous_key = WORKFLOW_STAGES[index - 1]
+            destinations.append((f"Previous: {previous_label}", previous_key))
+        if key == "migrate":
+            destinations.append(("Recheck: 1. Inventory", "inventory"))
+        elif index < 4:
+            next_label, next_key = WORKFLOW_STAGES[index + 1]
+            destinations.append((f"Next: {next_label}", next_key))
+        if key != "about":
+            destinations.append(("Help: Methodology & references", "about"))
+        stage_items.append(navigation_item(f"workflow-next-{key}", "WorkflowStage", destinations, style="paragraph"))
+        result.append(group_item(f"stage-{key}", key, stage_items))
+    return result
 
 
 def upgrade_path_panel(generation, lookups):
@@ -1382,7 +1592,7 @@ def build(data):
         "V5 does not eliminate MANA, guest OS, encryption, quota or application checks. "
         "A high score is not a migration certification. **100 means no scored platform penalty; "
         "guest, application, HA, backup and rollback checks may still be Unknown.** "
-        "Use Workload discovery to identify service ownership and stateful workload evidence.\n\n"
+        "Use Inventory > Workloads & owners to identify service ownership and stateful workload evidence.\n\n"
         "The platform score uses your **actual** fleet attributes - the real Hyper-V "
         "generation of each OS disk, the region and zone each VM runs in, and whether it "
         "sits in an availability set or scale set - not from size metadata alone.\n\n"
@@ -1395,6 +1605,16 @@ def build(data):
         "content": {
             "version": "KqlParameterItem/1.0",
             "parameters": [
+                {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"workflow:{name}")),
+                    "version": "KqlParameterItem/1.0", "name": name, "type": 1,
+                    "isRequired": True, "isHiddenWhenLocked": True, "value": value,
+                }
+                for name, value in [("WorkflowStage", "start")] + [
+                    (parameter, options[0][1])
+                    for parameter, options in WORKFLOW_REPORTS.values()
+                ]
+            ] + [
                 {
                     "id": "b0a1f2c3-1111-4a11-9c01-000000000001",
                     "version": "KqlParameterItem/1.0",
@@ -1457,27 +1677,7 @@ def build(data):
         "name": "lookup-parameters",
     })
 
-    tabs = [("Overview", "overview"), ("Impacted resources", "impacted"),
-            ("Workload discovery", "discovery"),
-            ("SQL modernization", "sql"),
-            ("Upgrade paths", "paths"),
-            ("Capacity / quota", "quota"),
-            ("Target mapping", "mapping"), ("Prerequisites", "prereq"),
-            ("Migration plan", "plan"), ("About", "about")]
-    items.append({
-        "type": 11,
-        "content": {
-            "version": "LinkItem/1.0",
-            "style": "tabs",
-            "links": [
-                {"id": f"c0a1f2c3-3333-4a33-9c03-00000000000{i}",
-                 "cellValue": "SelectedTab", "linkTarget": "parameter",
-                 "linkLabel": label, "subTarget": key, "preText": "", "style": "link"}
-                for i, (label, key) in enumerate(tabs)
-            ],
-        },
-        "name": "tabs",
-    })
+    items.append(navigation_item("tabs", "WorkflowStage", WORKFLOW_STAGES))
 
     items.append(group_item("grp-paths", "paths", [
         text_item(
@@ -2110,7 +2310,7 @@ def build(data):
         "[Windows](https://azure.microsoft.com/pricing/details/virtual-machines/windows/) and "
         "[Linux](https://azure.microsoft.com/pricing/details/virtual-machines/linux/) VM "
         "pricing pages. This flag is separate from the regional exposure section.\n\n"
-        "**Regional pricing exposure.** The Impacted resources tab separately shows VMs in "
+        "**Regional pricing exposure.** Inventory > Retirement & pricing separately shows VMs in "
         "seven regions with publicly reproduced notification changes. Its figures are not a "
         "formal public announcement, contractual rates or a bill forecast. Confirm Service "
         "Health scope and your agreement; regional exclusions do not exempt a series from "
@@ -2182,7 +2382,7 @@ def build(data):
 
     return {
         "version": "Notebook/1.0",
-        "items": items,
+        "items": workflow_layout(items),
         "styleSettings": {},
         "fallbackResourceIds": ["Azure Monitor"],
         "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",

@@ -4,7 +4,11 @@ import json
 import unittest
 
 import build_workbook as builder
-from validate_queries import structure_check, walk
+from validate_queries import structure_check, walk, walk_items
+
+
+def find_item(workbook, name):
+    return next(item for item in walk_items(workbook["items"]) if item["name"] == name)
 
 
 class WorkbookDeploymentTests(unittest.TestCase):
@@ -12,6 +16,98 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def setUpClass(cls):
         cls.data = builder.load()
         cls.workbook = builder.build(cls.data)
+
+    def test_workflow_has_six_stages_and_starts_with_guidance(self):
+        links = find_item(self.workbook, "tabs")["content"]["links"]
+        self.assertEqual([(link["linkLabel"], link["subTarget"]) for link in links], [
+            ("Start here", "start"), ("1. Inventory", "inventory"), ("2. Assess", "assess"),
+            ("3. Plan", "planning"), ("4. Migrate & validate", "migrate"),
+            ("Methodology & references", "about")])
+        roots = [item for item in self.workbook["items"] if item["type"] == 12]
+        self.assertEqual([item["conditionalVisibility"]["value"] for item in roots],
+                         [link["subTarget"] for link in links])
+        parameters = find_item(self.workbook, "parameters")["content"]["parameters"]
+        self.assertEqual(next(p["value"] for p in parameters if p["name"] == "WorkflowStage"), "start")
+        self.assertNotIn("SelectedTab", {p["name"] for p in parameters},
+                         "Legacy report-tab state must not select a nonexistent workflow stage.")
+
+    def test_workflow_report_selectors_are_independent_and_stage_scoped(self):
+        expected = {
+            "inventory": ("InventoryView", ["overview", "impacted", "discovery", "coverage"]),
+            "assess": ("AssessView", ["paths", "prereq", "sql"]),
+            "planning": ("PlanView", ["quota", "mapping", "plan"]),
+        }
+        parameters = {p["name"]: p for p in find_item(self.workbook, "parameters")["content"]["parameters"]}
+        for stage, (parameter, keys) in expected.items():
+            group = find_item(self.workbook, f"stage-{stage}")
+            reports = [item for item in group["content"]["items"] if item["type"] == 12]
+            self.assertEqual([item["conditionalVisibility"]["value"] for item in reports], keys)
+            self.assertTrue(all(item["conditionalVisibility"]["parameterName"] == parameter for item in reports))
+            self.assertEqual(parameters[parameter]["value"], keys[0])
+            self.assertTrue(parameters[parameter]["isHiddenWhenLocked"])
+            links = find_item(self.workbook, f"workflow-views-{stage}")["content"]["links"]
+            self.assertEqual([link["subTarget"] for link in links], keys)
+            self.assertTrue(all(link["cellValue"] == parameter for link in links))
+
+    def test_workflow_guidance_and_next_actions_exist_for_every_stage(self):
+        next_steps = {"start": "inventory", "inventory": "assess", "assess": "planning",
+                      "planning": "migrate", "migrate": "inventory"}
+        for _, stage in builder.WORKFLOW_STAGES:
+            guide = find_item(self.workbook, f"workflow-guide-{stage}")["content"]["json"]
+            for label in ("**Goal:**", "**What to do:**", "**Before moving on:**",
+                          "**Outcome / interpretation:**"):
+                self.assertIn(label, guide)
+            links = find_item(self.workbook, f"workflow-next-{stage}")["content"]["links"]
+            self.assertEqual(find_item(self.workbook, f"workflow-next-{stage}")["content"]["style"], "paragraph",
+                             "Footer actions must not behave as auto-selecting tabs.")
+            if stage in next_steps:
+                self.assertIn(next_steps[stage], [link["subTarget"] for link in links])
+            self.assertTrue(all(link["cellValue"] == "WorkflowStage" for link in links))
+
+    def test_migration_stage_is_a_customer_checklist_not_an_executor(self):
+        stage = find_item(self.workbook, "stage-migrate")
+        self.assertFalse(any(item["type"] == 3 for item in walk_items([stage])))
+        guide = find_item(self.workbook, "workflow-guide-migrate")["content"]["json"]
+        self.assertIn("does not execute migrations, track completion", guide)
+        checklist = find_item(self.workbook, "workflow-execution-checklist")["content"]["json"]
+        for phrase in ("backup/restore", "rollback", "Baseline", "HA/failover",
+                       "application-owner acceptance", "Do not resize managed backing VMs individually",
+                       "not proof of migration success"):
+            self.assertIn(phrase, checklist)
+
+    def test_empty_results_are_not_an_all_clear_or_proof_sql_is_absent(self):
+        sql = find_item(self.workbook, "sql-modernization-grid")["content"]["noDataMessage"]
+        self.assertIn("does not prove SQL is absent", sql)
+        inventory = find_item(self.workbook, "imp-grid")["content"]["noDataMessage"]
+        self.assertIn("empty result is not migration approval", inventory)
+        self.assertIn("subscription access", inventory)
+
+    def test_navigation_validator_rejects_broken_nested_links_defaults_and_roots(self):
+        workbook = copy.deepcopy(self.workbook)
+        find_item(workbook, "workflow-views-assess")["content"]["links"][0]["subTarget"] = "missing"
+        self.assertTrue(any("navigation/group mismatch" in error for error in structure_check(workbook)))
+        workbook = copy.deepcopy(self.workbook)
+        parameters = find_item(workbook, "parameters")["content"]["parameters"]
+        next(p for p in parameters if p["name"] == "InventoryView")["value"] = "missing"
+        self.assertIn("navigation parameter InventoryView has no valid default", structure_check(workbook))
+        workbook = copy.deepcopy(self.workbook)
+        find_item(workbook, "stage-inventory")["conditionalVisibility"]["parameterName"] = "InventoryView"
+        self.assertIn("top-level group stage-inventory must be a workflow stage", structure_check(workbook))
+
+    def test_workflow_item_names_and_link_ids_are_unique(self):
+        items = list(walk_items(self.workbook["items"]))
+        names = [item["name"] for item in items]
+        self.assertEqual(len(names), len(set(names)))
+        link_ids = [link["id"] for item in items if item["type"] == 11
+                    for link in item["content"]["links"]]
+        self.assertEqual(len(link_ids), len(set(link_ids)))
+
+    def test_catalogue_coverage_is_in_inventory_not_hidden_in_methodology(self):
+        coverage = find_item(self.workbook, "grp-coverage")
+        self.assertEqual(coverage["conditionalVisibility"]["parameterName"], "InventoryView")
+        self.assertEqual({item["name"] for item in coverage["content"]["items"] if item["type"] == 3},
+                         {"about-coverage", "about-allsizes"})
+        self.assertFalse(any(item["type"] == 3 for item in walk_items([find_item(self.workbook, "stage-about")])))
 
     def test_saved_workbook_and_arm_resource_fit_size_limit(self):
         resource = builder.arm_template(self.workbook)["resources"][0]
@@ -84,7 +180,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual(structure_check(self.workbook), [])
 
     def test_retirement_and_regional_prices_are_independent_sections(self):
-        group = next(i for i in self.workbook["items"] if i["name"] == "grp-impacted")
+        group = find_item(self.workbook, "grp-impacted")
         queries = {i["name"]: i["content"]["query"] for i in group["content"]["items"]
                    if i["type"] == 3}
         self.assertEqual(set(queries), {"imp-grid", "regional-price-grid"})
@@ -129,11 +225,11 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertNotIn("{LifecycleFilter}", query)
         self.assertIn("does not prove SQL is running", query)
         self.assertNotIn("| where ExtensionState", query)
-        group = next(i for i in self.workbook["items"] if i["name"] == "grp-sql")
+        group = find_item(self.workbook, "grp-sql")
         self.assertEqual(group["conditionalVisibility"]["value"], "sql")
 
     def test_upgrade_paths_are_two_half_width_panels_in_one_tab(self):
-        group = next(i for i in self.workbook["items"] if i["name"] == "grp-paths")
+        group = find_item(self.workbook, "grp-paths")
         self.assertEqual(group["conditionalVisibility"]["value"], "paths")
         panels = [i for i in group["content"]["items"] if i["type"] == 12]
         self.assertEqual([p["name"] for p in panels], ["path-v5-panel", "path-v6-panel"])
@@ -201,7 +297,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertNotIn("'TRUE'", query)
 
     def test_live_eligibility_is_exact_target_read_only_and_unknown_without_data(self):
-        group = next(i for i in self.workbook["items"] if i["name"] == "grp-paths")
+        group = find_item(self.workbook, "grp-paths")
         live = next(i for i in group["content"]["items"] if i["name"] == "eligibility-live")
         source = next(i for i in group["content"]["items"] if i["name"] == "eligibility-sources")
         request = json.loads(live["content"]["query"])
@@ -245,7 +341,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("UnresolvedResources", demand)
         self.assertIn("isnull(Limit) or isnull(Usage)", check)
         self.assertIn("Not met - quota shortfall", check)
-        group = next(i for i in self.workbook["items"] if i["name"] == "grp-quota")
+        group = find_item(self.workbook, "grp-quota")
         controls = next(i for i in group["content"]["items"] if i["name"] == "quota-parameters")
         parameters = controls["content"]["parameters"]
         self.assertEqual(len(parameters), 4)
@@ -300,7 +396,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
 
     def test_nested_upgrade_queries_must_be_subscription_scoped(self):
         workbook = copy.deepcopy(self.workbook)
-        group = next(i for i in workbook["items"] if i["name"] == "grp-paths")
+        group = find_item(workbook, "grp-paths")
         panel = next(i for i in group["content"]["items"] if i["name"] == "path-v5-panel")
         panel["content"]["items"][1]["content"]["crossComponentResources"] = []
         self.assertIn("path-v5-grid: ARG query not scoped to {Subscriptions}", structure_check(workbook))
@@ -392,7 +488,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("missing shared lookup RegionIdMap", structure_check(workbook))
 
     def test_quota_summary_is_compact_and_retains_shortfalls(self):
-        group = next(i for i in self.workbook["items"] if i["name"] == "grp-quota")
+        group = find_item(self.workbook, "grp-quota")
         queries = {i["name"]: i for i in group["content"]["items"] if i["type"] == 3}
         summary = queries["quota-summary"]["content"]
         hidden = {f["columnMatch"] for f in summary["gridSettings"]["formatters"] if f.get("formatter") == 5}
@@ -410,7 +506,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("FamilyAvailable < RegionalAvailable", builder.quota_headroom_query("resources"))
         self.assertNotIn("quota_headroom", builder.quota_summary_query("resources"))
         workbook = copy.deepcopy(self.workbook)
-        group = next(i for i in workbook["items"] if i["name"] == "grp-quota")
+        group = find_item(workbook, "grp-quota")
         summary = next(i for i in group["content"]["items"] if i["name"] == "quota-summary")
         summary["content"]["crossComponentResources"] = ["{Subscriptions}"]
         self.assertTrue(any("quota-summary: ARG query not scoped" in p for p in structure_check(workbook)))

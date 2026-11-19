@@ -51,18 +51,27 @@ Gen1 VMs, one Gen2 VM and one v3 end-of-life VM.</sub>
 
 ## What you get
 
-| Tab | Contents |
+The default landing page is **Start here**. Follow the numbered stages, or jump
+directly to a stage and use its report selector. Each stage explains its goal,
+actions, interpretation, checkpoint and next step. Report selections are
+independent, so returning to a stage retains its current report during the session.
+The workflow uses a new navigation parameter, rather than reusing legacy
+`SelectedTab` report values that could otherwise hide every stage after an upgrade.
+
+| Stage | Reports and outcome |
 | --- | --- |
-| **Overview** | Fleet summary, platform-only scores and change bands, urgency, actual VM generation, series-wide commercial signals and top affected sizes; not application complexity or migration approval |
-| **Impacted resources** | Two independent sections: retirement/end-of-life candidates with upgrade prerequisites, and potential regional price exposure (including reported exclusions and source/scope caveats) |
-| **Workload discovery** | Evidence-based compute ownership, service-specific migration methods, NIC/disk/security/persistence observations, independent service registrations and configured AKS/Batch pools |
-| **SQL modernization** | Retiring VMs with exact SQL IaaS extension and/or SQL VM registration evidence, provisioning/power states, edition/licensing/management/group metadata; runtime and HA remain unverified |
-| **Upgrade paths** | Side-by-side V5/V6 prerequisites plus a selected-row live Compute SKU API inspector for exact target restrictions, zones and capabilities |
-| **Capacity / quota** | Compact total/per-subscription current cores, target cores, signed delta and quota status; selectable tenant scope, automatic quota checks and optional headroom detail |
-| **Target mapping** | Recommended/alternate targets, specifications, retirement dates and series-wide commercial cutoffs; customer reservation expiry and billing coverage are not inspected |
-| **Prerequisites** | Prerequisites triggered by *this* fleet, ranked Blocking / Validate / Plan, with what to do, why it matters, how to do it and a docs link, plus the count of affected resources and the sizes involved |
-| **Migration plan** | Five suggested waves, a burn-down by retirement quarter, and the long-pole workloads to start first |
-| **About** | Methodology, platform scoring, explicit mapped/unassessed SKU coverage, caveats and references |
+| **Start here** | Scope, permissions, workflow map, evidence limitations and expected outputs |
+| **1. Inventory** | Fleet overview; Retirement & pricing; Workloads & owners; Catalogue coverage. Produce a scoped workload list with owners and explicit unassessed SKUs |
+| **2. Assess** | V5 / V6 paths and live SKU inspector; Required actions; SQL opportunities. Produce candidate paths and a prerequisite/evidence backlog |
+| **3. Plan** | Capacity & quota; Target specifications; Suggested waves. Produce quota actions, pilots, dependency-aware waves and a recovery plan |
+| **4. Migrate & validate** | Customer-operated execution and acceptance checklist: pilot, backup/restore, rollback, application/performance/HA checks and source closeout. Links to supported service-specific methods |
+| **Methodology & references** | Recommendation policy, scoring model, sources and limitations; always accessible without advancing the workflow |
+
+This is **guidance, not an execution engine or completion tracker**. Maintain
+owners, decisions and approvals in your own exported plan. A green check applies
+only to its specific evidence; Unknown is not a pass. Empty grids and disappearing
+resources do not prove absence, successful migration or application readiness.
+The detailed report descriptions below retain their familiar names.
 
 ### Workload discovery and live eligibility
 
@@ -495,11 +504,12 @@ python scripts/validate_queries.py    # all 27 live ARG queries in the current C
 # python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace
 ```
 
-The workload-discovery release uses an explicitly limited **metadata/API validation**
-scope: 33 offline tests, all 27 live ARG queries, quota and pricing/SQL boundary
+The guided-workflow release uses an explicitly limited **metadata/API validation**
+scope: 41 offline tests, all 27 live ARG queries, quota and pricing/SQL boundary
 fixtures, workload-discovery fixtures and exact live target-SKU records. Fresh
 SQL guest-runtime verification was not completed because the SQL lab VM's guest
-agent did not report readiness after startup. Portal visual verification was
+agent did not report readiness during the earlier lab startup. No lab VM is
+started for this workflow-only validation. Portal visual verification was
 also not completed. SQL detection remains an assessment signal, not proof of a
 running SQL service or application migration readiness.
 
@@ -631,5 +641,5 @@ This table does not establish the scope of the separate regional notification:
 | v3 retirement | Applies | Exempt | Exempt |
 | 1 Feb 2027 pricing update | Applies | Applies | Exempt |
 
-The workbook does not detect cloud type; the About tab carries this table so a
+The workbook does not detect cloud type; Methodology & references carries this table so a
 reader in a sovereign or government tenant can discount the flags.
