@@ -472,7 +472,7 @@ def expand_lookups(query, workbook):
     return query
 
 
-def inventory_query(include_flexible_members=False):
+def inventory_query(include_flexible_members=False, include_placement_zones=False):
     member_filter = "" if include_flexible_members else (
         "\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))")
     return f"""resources
@@ -499,19 +499,19 @@ def inventory_query(include_flexible_members=False):
 | extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))
 | extend GuestOsName = tostring(properties.extended.instanceView.osName)
 | project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags"""
+          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags{', PlacementZones = zones' if include_placement_zones else ''}"""
 
 
 def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
                use_lookup_parameters=False, lookup_parameters=BASE_LOOKUP_PARAMETERS,
-               include_flexible_members=False):
+               include_flexible_members=False, include_placement_zones=False):
     """Fleet inventory joined to lifecycle metadata and target-specific scoring."""
     if use_lookup_parameters:
         m, reg, rids = ("{" + name + "}" for name in lookup_parameters)
     else:
         m, reg, rids = (kql_bag(value) for value in (sku_map, tgt_regions, region_ids))
     opt_filter = "" if include_optional else "\n| where Lifecycle != 'OPTIONAL'"
-    return inventory_query(include_flexible_members) + f"""
+    return inventory_query(include_flexible_members, include_placement_zones) + f"""
 | join kind=leftouter (
     resources
     | where type =~ 'microsoft.compute/disks'
@@ -1263,6 +1263,57 @@ def workflow_layout(items):
     return result
 
 
+ASSESSMENT_CHECKS = {
+    "TargetSelection": "A capability-preserving candidate exists in the captured catalogue; not live availability.",
+    "GenerationSupport": "The actual OS disk generation is supported by this target; Not met means conversion/rebuild is needed.",
+    "ConversionOS": "Windows OS eligibility for the selected Gen1-to-Trusted-Launch route; observed Server 2016 is Not met.",
+    "ConversionEncryption": "Windows OS encryption prerequisite for that conversion route; detected ADE configuration is Not met.",
+    "NvmeBoot": "NVMe image/disk/boot-driver readiness if this target requires it; a real target boot is still required.",
+    "ManaNetworking": "Target MANA hardware, guest driver and traffic validation; image origin alone cannot pass this.",
+    "Architecture": "Source and target CPU architecture match.",
+    "MemoryCapacity": "The selected target preserves source memory capacity.",
+    "LocalDisk": "Local-disk capacity, persistence assumptions and performance; known removal is Not met, otherwise review.",
+    "CatalogueRegion": "The target is present in the captured regional snapshot; use Live target availability for current offerability.",
+    "ZonePlacement": "Current zone compatibility and placement; zonal sources require live validation.",
+    "AvailabilitySet": "Availability-set placement and resize-cluster constraints, when membership exists.",
+    "ScaleSetModel": "Scale-set orchestration, upgrade policy and model-level migration, when applicable.",
+    "DiskLimits": "Attached disk count, IOPS, throughput and target storage limits.",
+    "NicLimits": "NIC count and target networking limits.",
+    "Quota": "Regional/family quota for this path; the separate quota report models the default V5-first fleet, not V6 approval.",
+    "Policy": "Subscription policy and deployment governance approval.",
+    "AllocationCapacity": "Actual allocation and resize-cluster capacity; the SKU API does not guarantee this.",
+    "Backup": "Recoverable backup/restore and conversion-route backup policy prerequisites.",
+    "AsrConversion": "ASR prerequisites when the selected route requires generation conversion.",
+    "ApplicationValidation": "Owner-approved application, performance, dependency and HA/failover tests.",
+    "Rollback": "A documented and rehearsed recovery/rollback route.",
+}
+
+
+def assessment_key():
+    return text_item(
+        "### Assessment column and status key\n\n"
+        "The compact grids show the resource, target, generation, NVMe and MANA checks, plus "
+        "**ChecksNotMet** (observed mismatches across all 22 checks) and **ChecksUnknown** "
+        "(missing evidence across all 22). Click **All 22 checks** for that VM's vertically "
+        "listed statuses and evidence. Export retains every prerequisite as its own column. "
+        "Zero mismatches is not approval when evidence remains Unknown.\n\n"
+        "| Status | Meaning and example |\n| --- | --- |\n"
+        "| Met | Evidence meets this specific check; e.g. the target supports the observed disk generation. Not migration approval. |\n"
+        "| Not met | An observed mismatch or unmet prerequisite; e.g. Gen1 against a Gen2-only target. Convert, rebuild or choose another target. |\n"
+        "| Unknown | Evidence or testing is missing; e.g. a driver/traffic test, quota or application acceptance. Neither a pass nor proof of failure. |\n"
+        "| Not applicable | This chosen target/route does not trigger the check; e.g. Windows conversion encryption on a route with no conversion. |\n\n"
+        "| Prerequisite field | What it checks |\n| --- | --- |\n"
+        + "\n".join(f"| {name} | {description} |" for name, description in ASSESSMENT_CHECKS.items())
+        + "\n\n**Evidence fields:** Prerequisites explains target-specific actions; Validation lists "
+        "evidence and remaining work. VmGeneration comes from disk metadata or a labelled image hint; "
+        "ConversionRequired/NvmeRequired describe the chosen target. OsEvidence, EncryptionEvidence "
+        "and ImageProvenance are observations/hints, not guest certification. OsHintSource, NvmeOsHint, "
+        "ManaOsHint and their reference/date fields identify the captured OS guidance. "
+        "NvmeDriverValidation/ManaDriverValidation remain unverified until tested. "
+        "ResourceId links back to the Azure resource.",
+        "assessment-column-key")
+
+
 def upgrade_path_panel(generation, lookups):
     sku_map, _, _, regions, region_ids = lookups
     query = base_query(
@@ -1339,8 +1390,16 @@ def upgrade_path_panel(generation, lookups):
          AsrConversion = case(isempty(RecommendedTarget), 'Unknown',
              not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),
          ApplicationValidation = 'Unknown', Rollback = 'Unknown'
-| project Resource, Target, TargetSelection, GenerationSupport, ConversionOS,
-          ConversionEncryption, NvmeBoot, ManaNetworking, Architecture, MemoryCapacity,
+"""
+    query += "\n| extend ChecksNotMet = " + " + ".join(
+        f"iff({name} == 'Not met', 1, 0)" for name in ASSESSMENT_CHECKS)
+    query += ",\n         ChecksUnknown = " + " + ".join(
+        f"iff({name} == 'Unknown', 1, 0)" for name in ASSESSMENT_CHECKS)
+    query += """
+| extend Review = 'All 22 checks'
+| project Resource, Target, GenerationSupport, NvmeBoot, ManaNetworking,
+          ChecksNotMet, ChecksUnknown, Review, TargetSelection, ConversionOS,
+          ConversionEncryption, Architecture, MemoryCapacity,
           LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,
           DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,
           ApplicationValidation, Rollback,
@@ -1373,41 +1432,46 @@ def upgrade_path_panel(generation, lookups):
         "- If required, validate NVMe image/disk capability, boot-critical driver and an actual converted-disk boot.\n"
         "- Validate MANA hardware, driver and traffic separately; custom image origin is not proof of a missing driver.\n"
         "- Confirm local-disk capacity/performance, disk/NIC limits, quota/policy/zone/cluster availability, applications and rollback.")
-    hidden = ("ResourceId", "VmGeneration", "ConversionRequired", "NvmeRequired",
+    hidden = ("ResourceId", "Prerequisites", "Validation", "VmGeneration", "ConversionRequired", "NvmeRequired",
               "ImageProvenance", "OsEvidence", "EncryptionEvidence", "OsHintSource",
               "NvmeOsHint", "ManaOsHint", "NvmeDriverValidation", "ManaDriverValidation",
-              "NvmeOsReference", "ManaOsReference", "OsReferenceChecked")
+              "NvmeOsReference", "ManaOsReference", "OsReferenceChecked") + tuple(
+                  name for name in ASSESSMENT_CHECKS
+                  if name not in ("GenerationSupport", "NvmeBoot", "ManaNetworking"))
     return {
         "type": 12,
         "name": f"path-v{generation}-panel",
-        "customWidth": "50",
+        "customWidth": "100",
         "content": {
             "version": "NotebookGroup/1.0", "groupType": "editable",
             "items": [
                 text_item(f"### V{generation} upgrade path\n\n{guidance}", f"path-v{generation}-intro"),
                 arg_query(
                     query, f"path-v{generation}-grid", size=1, export=True,
-                    title=f"V{generation} targets and prerequisites",
+                    title=f"V{generation} targets - select All 22 checks for per-VM details",
                     grid=grid_settings(
-                        {"Resource": "28ch", "Target": "24ch",
-                         **{name: "20ch" for name in (
-                             "TargetSelection", "GenerationSupport", "ConversionOS",
-                             "ConversionEncryption", "NvmeBoot", "ManaNetworking",
-                             "Architecture", "MemoryCapacity", "LocalDisk", "CatalogueRegion",
-                             "ZonePlacement", "AvailabilitySet", "ScaleSetModel",
-                             "DiskLimits", "NicLimits", "Quota", "Policy", "AllocationCapacity",
-                             "Backup", "AsrConversion", "ApplicationValidation", "Rollback")},
-                         "Prerequisites": "70ch", "Validation": "70ch"},
+                        {"Resource": "20%", "Target": "19%", "GenerationSupport": "10%",
+                         "NvmeBoot": "9%", "ManaNetworking": "9%", "ChecksNotMet": "9%",
+                         "ChecksUnknown": "9%", "Review": "15%"},
                         [fmt("Resource", 1, formatOptions={"linkColumn": "ResourceId",
                                                          "linkTarget": "Resource",
+                                                         "linkIsContextBlade": True}),
+                         fmt("Review", 1, formatOptions={"linkTarget": "GenericDetails",
                                                          "linkIsContextBlade": True})]
+                        + [fmt(name, 18, formatOptions={"thresholdsOptions": "colors",
+                             "thresholdsGrid": [
+                                 {"operator": ">", "thresholdValue": 0, "representation": color,
+                                  "text": "{0}{1}"},
+                                 {"operator": "Default", "representation": "gray", "text": "{0}{1}"}]})
+                           for name, color in (("ChecksNotMet", "red"), ("ChecksUnknown", "orange"))]
                         + [fmt(name, 5) for name in hidden],
                         filter=True)),
                 text_item(
                     "**Status legend:** Met = observed/captured evidence meets this specific check; "
                     "Not met = observed mismatch; Unknown = validation evidence missing; "
                     "Not applicable = this target/route does not trigger the check. "
-                    "Scroll horizontally or export for all prerequisite columns. Catalogue matches "
+                    "Use **All 22 checks** for vertically listed statuses/evidence, or export "
+                    "for every prerequisite column. See the column key below. Catalogue matches "
                     "are not guest certification or a live capacity guarantee. The OS/encryption "
                     "checks describe the documented Trusted Launch conversion route, not every rebuild.\n\n"
                     + checklist, f"path-v{generation}-checklist"),
@@ -1492,12 +1556,32 @@ def eligibility_items(base):
 | extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',
          parse_json('{V5PathSkuMap}')[VmSize], parse_json('{V6PathSkuMap}')[VmSize]))
 | extend SelectedTargetSku = tostring(split(PathRecord, '|')[3]), SourceSubscriptionId = SubscriptionId,
-         SourceRegion = Region, SourceZone = Zone
-| project Name, VmSize, SelectedTargetSku, SourceRegion, SourceZone, SourceSubscriptionId, ResourceId
-| order by Name asc""", "eligibility-sources", size=1, export=True,
-        title="Select a resource to inspect its V5 or V6 target in the current subscription / region",
-        grid=grid_settings({"Name": "24ch", "VmSize": "22ch", "SelectedTargetSku": "24ch"},
-                           [fmt("ResourceId", 5)], filter=True))
+         SourceRegion = Region,
+         PlacementOptions = iff(isnull(PlacementZones) or array_length(PlacementZones) == 0,
+                                dynamic(['Regional']), PlacementZones)
+| mv-expand SourceZone = PlacementOptions limit 2000
+| extend SourceZone = tostring(SourceZone),
+         ZoneInstances = iff(array_length(PlacementZones) > 1, tolong(''), tolong(Instances))
+| summarize AffectedResources = count(), KnownInstances = sum(ZoneInstances),
+            MultiZoneModels = countif(array_length(PlacementZones) > 1),
+            UnknownInstanceResources = countif(isnull(ZoneInstances) or ZoneInstances < 0)
+    by SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku
+| extend AffectedInstances = iff(UnknownInstanceResources > 0, tolong(''), KnownInstances)
+| project SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku,
+          AffectedResources, AffectedInstances, MultiZoneModels, UnknownInstanceResources
+| order by SourceSubscriptionId asc, SourceRegion asc, SourceZone asc, SelectedTargetSku asc""",
+        "eligibility-sources", size=1, export=True,
+        title="Select one subscription / region / zone / target SKU combination",
+        grid=grid_settings({"SourceSubscriptionId": "27%", "SourceRegion": "12%", "SourceZone": "10%",
+                            "SelectedTargetSku": "25%", "AffectedResources": "13%", "AffectedInstances": "13%"},
+                           [fmt("MultiZoneModels", 5), fmt("UnknownInstanceResources", 5)], filter=True,
+                           labelSettings=[
+                               {"columnId": "SourceSubscriptionId", "label": "Subscription"},
+                               {"columnId": "SourceRegion", "label": "Region"},
+                               {"columnId": "SourceZone", "label": "Zone / regional"},
+                               {"columnId": "SelectedTargetSku", "label": "Target SKU"},
+                               {"columnId": "AffectedResources", "label": "Resources"},
+                               {"columnId": "AffectedInstances", "label": "Instances (blank = unknown)"}]))
     source["content"]["exportedParameters"] = [
         {"fieldName": field, "parameterName": parameter, "parameterType": 1}
         for field, parameter in (("SourceSubscriptionId", "LiveSubscription"), ("SourceRegion", "LiveRegion"),
@@ -1517,20 +1601,32 @@ def eligibility_items(base):
     }
     return [
         text_item(
-            "## Live target eligibility inspection\n\n"
-            "Choose a path, then **select a resource row**. The read-only Compute SKU API returns "
-            "the exact catalogued target's current subscription/region record, full restriction "
-            "objects, zones and capabilities. A missing target or failed API request is **Unknown**, "
+            "## Live target availability - SKU support and restrictions\n\n"
+            "Choose a path, then **select a placement combination**, not an individual VM. "
+            "Each row groups the exact **subscription / region / zone / target SKU** shared by "
+            "affected resources. This read-only Compute SKU check inspects subscription-specific "
+            "SKU offerability, advertised regions/zones and restriction records. It does not "
+            "attempt an allocation or promise physical capacity. "
+            "A missing target or failed API request is **Unknown**, "
             "not an unsupported SKU or a passed check. No row means no eligibility evidence.\n\n"
             "Inspect each restriction's **type, reasonCode, restrictionInfo.locations and zones** "
             "against the selected placement. A zonal restriction is not automatically a regional "
             "block. An empty restriction list means no SKU restriction was returned, not quota, "
             "policy, cluster-resize compatibility or physical allocation approval. Compare current "
-            "capabilities with NIC/data-disk counts in Workload discovery. Clear/reselect a resource "
+            "capabilities with NIC/data-disk counts in Workload discovery. Clear/reselect a combination "
             "after changing the path; the details below always name the selected target.\n\n"
-            "Current selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, "
-            "region **{LiveRegion}**, source zone **{LiveZone}**. This inspector does not change "
-            "the captured catalogue, recommendations or prerequisite statuses.",
+            "**Placement key:** Regional means no zone was specified; it does not mean every zone "
+            "is supported. A multi-zone scale-set model contributes a combination for each declared "
+            "zone; its resources repeat across those rows and its per-zone instance count stays "
+            "Unknown (blank). Missing/invalid model capacity also keeps the combination's instance "
+            "count Unknown, never zero. Do not sum those rows as fleet capacity. "
+            "Missing targets need manual selection.\n\n"
+            "**Result key:** A returned SKU must advertise the selected region and, for zonal placement, "
+            "the selected zone. A matching location or zone restriction means restricted for that "
+            "placement. Advertised placement with no applicable restriction means no SKU restriction "
+            "returned, **not deployment approval**. The raw record below preserves the evidence; "
+            "it is not an automatic all-clear. This inspector does not change the captured catalogue, "
+            "recommendations or prerequisite statuses.",
             "eligibility-intro"),
         {"type": 9, "name": "eligibility-parameters", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [{
@@ -1541,10 +1637,15 @@ def eligibility_items(base):
                 "value": "", "isHiddenWhenLocked": True}
                for name in ("LiveSubscription", "LiveRegion", "LiveTarget", "LiveZone")]}},
         source,
+        text_item(
+            "Current selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, "
+            "region **{LiveRegion}**, zone / regional **{LiveZone}**. Compare this placement with "
+            "**LocationAndZones** and the full **Restrictions** below.",
+            "eligibility-selection"),
         {"type": 3, "name": "eligibility-live", "conditionalVisibility": {
             "parameterName": "LiveTarget", "comparison": "isNotEqualTo", "value": ""},
          "content": {"version": "KqlItem/1.0", "queryType": 12, "query": json.dumps(arm),
-                     "title": "Live SKU record - inspect placement-specific restrictions; not migration approval",
+                     "title": "Live target availability evidence - advertised zones and placement restrictions",
                      "size": 1, "visualization": "table", "showExportToExcel": True,
                      "noDataMessage": "Unknown: no matching target SKU returned. Check selection, API permissions and region.",
                      "gridSettings": grid_settings({"Target": "24ch", "Restrictions": "80ch"}, filter=True)}},
@@ -1690,12 +1791,39 @@ def build(data):
             "paths-intro"),
         upgrade_path_panel(5, path_lookups[5]),
         upgrade_path_panel(6, path_lookups[6]),
-    ] + eligibility_items(base_impacted)))
+        assessment_key(),
+    ] + eligibility_items(base_query(
+        sku_map, tgt_regions, region_ids, include_optional=False, use_lookup_parameters=True,
+        include_placement_zones=True))))
     items.append(group_item("grp-discovery", "discovery", discovery_items()))
     items.append(group_item("grp-quota", "quota", quota_planning_items(base)))
 
     # ---------------- TAB 1: Overview ----------------
     ov = []
+    ov.append(text_item(
+        "### Platform score and scored platform changes\n\n"
+        "**Platform score** starts at 100, subtracts the selected target's scored platform "
+        "penalties and stops at 0. Higher means fewer **scored platform differences**, not "
+        "a count of checks passed, application complexity or probability of migration success. "
+        "**100 is not migration approval.** Unknown guest drivers, applications, HA, backup "
+        "and rollback can remain unverified without reducing the score. Inventory uses the "
+        "**default V5-first recommendation**; the live inspector's path selector does not rescore it.\n\n"
+        "| Score | Scored platform changes | Example |\n| --- | --- | --- |\n"
+        "| 85-100 | Few scored platform changes - validation required | No penalty = 100; NVMe validation alone = 85. |\n"
+        "| 60-84 | Moderate scored platform changes | Target absent from the source region snapshot: 100 - 30 = 70. |\n"
+        "| 35-59 | Substantial scored platform changes | Gen1 to a Gen2-only target: 100 - 45 = 55. |\n"
+        "| 0-34 | Major scored platform changes | Gen1 conversion plus region mismatch: 100 - 45 - 30 = 25. |\n\n"
+        "The distribution shows **populated bands only**. Seeing only Few means every matching "
+        "resource currently scores 85-100, not that other bands are missing. Gen1, Server 2016 "
+        "and ADE can still score highly against a compatible V5 target. Change the target/path "
+        "and the checks may differ; do not manufacture a worse target to fill a band.\n\n"
+        "**Penalty key:** architecture change 50; Gen1 conversion 45; captured region mismatch 30; "
+        "memory reduction 25; temp disk removed 20; unknown generation on a Gen2-only target 20; "
+        "NVMe 15; narrow regional footprint 10; zone coverage warning on a zonal source 10; "
+        "vCPU change 5; availability-set membership 5; VMSS 5. MANA validation deducts 0 "
+        "and must still be tested. See Methodology for evaluation rules.",
+        "ov-score-key"))
+
     ov.append(arg_query(
         base + """
 | summarize Impacted = countif(Lifecycle != 'OPTIONAL'),
@@ -1799,6 +1927,22 @@ def build(data):
                 {"columnId": "PriceUpdate2027", "label": "Pricing update"},
                 {"columnId": "RiStatus", "label": "Series RI cutoff - customer coverage unverified"},
             ])))
+
+    ov.append(text_item(
+        "### What commercial impact means\n\n"
+        "These are **series-level planning signals**, not your current bill or reservation inventory.\n\n"
+        "- **Pricing update:** the captured catalogue flags legacy series with a 1 February 2027 "
+        "price update. Confirm the notification and applicable rate in Service Health/your agreement.\n"
+        "- **Series RI cutoff:** a published purchase/renewal cutoff is recorded for the series "
+        "(1 July 2026 in the captured catalogue). **Passed** means that date is past; "
+        "**Upcoming** means it has not passed; **No cutoff in captured catalogue** means no date "
+        "is recorded, not guaranteed RI availability. Affected terms differ by series; see Methodology.\n"
+        "- **Coverage not assessed:** this workbook does not read your reservations, remaining "
+        "terms, expiry dates or negotiated discounts. A cutoff does not mean an existing RI "
+        "expired or the VM is now billed at PAYG.\n"
+        "- **Regional price exposure** is a separate report under Inventory > Retirement & pricing. "
+        "Modern VMs can appear there without retiring. Do not combine the two signals as a price forecast.",
+        "ov-commercial-key"))
 
     ov.append(arg_query(
         base_impacted + """

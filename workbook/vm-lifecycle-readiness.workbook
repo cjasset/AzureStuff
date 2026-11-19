@@ -414,6 +414,17 @@
               "groupType": "editable",
               "items": [
                 {
+                  "type": 1,
+                  "content": {
+                    "json": "### Platform score and scored platform changes\n\n**Platform score** starts at 100, subtracts the selected target's scored platform penalties and stops at 0. Higher means fewer **scored platform differences**, not a count of checks passed, application complexity or probability of migration success. **100 is not migration approval.** Unknown guest drivers, applications, HA, backup and rollback can remain unverified without reducing the score. Inventory uses the **default V5-first recommendation**; the live inspector's path selector does not rescore it.\n\n| Score | Scored platform changes | Example |\n| --- | --- | --- |\n| 85-100 | Few scored platform changes - validation required | No penalty = 100; NVMe validation alone = 85. |\n| 60-84 | Moderate scored platform changes | Target absent from the source region snapshot: 100 - 30 = 70. |\n| 35-59 | Substantial scored platform changes | Gen1 to a Gen2-only target: 100 - 45 = 55. |\n| 0-34 | Major scored platform changes | Gen1 conversion plus region mismatch: 100 - 45 - 30 = 25. |\n\nThe distribution shows **populated bands only**. Seeing only Few means every matching resource currently scores 85-100, not that other bands are missing. Gen1, Server 2016 and ADE can still score highly against a compatible V5 target. Change the target/path and the checks may differ; do not manufacture a worse target to fill a band.\n\n**Penalty key:** architecture change 50; Gen1 conversion 45; captured region mismatch 30; memory reduction 25; temp disk removed 20; unknown generation on a Gen2-only target 20; NVMe 15; narrow regional footprint 10; zone coverage warning on a zonal source 10; vCPU change 5; availability-set membership 5; VMSS 5. MANA validation deducts 0 and must still be tested. See Methodology for evaluation rules."
+                  },
+                  "name": "ov-score-key",
+                  "styleSettings": {
+                    "margin": "0",
+                    "padding": "0"
+                  }
+                },
+                {
                   "type": 3,
                   "content": {
                     "version": "KqlItem/1.0",
@@ -648,6 +659,17 @@
                   "customWidth": "50",
                   "styleSettings": {
                     "maxWidth": "760px"
+                  }
+                },
+                {
+                  "type": 1,
+                  "content": {
+                    "json": "### What commercial impact means\n\nThese are **series-level planning signals**, not your current bill or reservation inventory.\n\n- **Pricing update:** the captured catalogue flags legacy series with a 1 February 2027 price update. Confirm the notification and applicable rate in Service Health/your agreement.\n- **Series RI cutoff:** a published purchase/renewal cutoff is recorded for the series (1 July 2026 in the captured catalogue). **Passed** means that date is past; **Upcoming** means it has not passed; **No cutoff in captured catalogue** means no date is recorded, not guaranteed RI availability. Affected terms differ by series; see Methodology.\n- **Coverage not assessed:** this workbook does not read your reservations, remaining terms, expiry dates or negotiated discounts. A cutoff does not mean an existing RI expired or the VM is now billed at PAYG.\n- **Regional price exposure** is a separate report under Inventory > Retirement & pricing. Modern VMs can appear there without retiring. Do not combine the two signals as a price forecast."
+                  },
+                  "name": "ov-commercial-key",
+                  "styleSettings": {
+                    "margin": "0",
+                    "padding": "0"
                   }
                 },
                 {
@@ -1619,7 +1641,7 @@
                 {
                   "type": 12,
                   "name": "path-v5-panel",
-                  "customWidth": "50",
+                  "customWidth": "100",
                   "content": {
                     "version": "NotebookGroup/1.0",
                     "groupType": "editable",
@@ -1639,7 +1661,7 @@
                         "type": 3,
                         "content": {
                           "version": "KqlItem/1.0",
-                          "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{V5PathSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| where Lifecycle != 'OPTIONAL'\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{V5PathRegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{V5PathRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// This series-wide cutoff is not a customer's reservation expiry or billing coverage.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',\n        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',\n        'Series purchase/renewal cutoff upcoming; coverage not assessed')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Few scored platform changes - validation required',\n        ReadinessScore >= 60, 'Moderate scored platform changes',\n        ReadinessScore >= 35, 'Substantial scored platform changes',\n        'Major scored platform changes')\n| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| extend OsHintSource = iff(isnotempty(GuestOsName), 'Guest OS metadata', 'Image hint only - current guest unverified'),\n         OsHintText = tolower(iff(isnotempty(GuestOsName), GuestOsName, strcat(ImagePublisher, ' ', ImageOffer, ' ', ImageSku)))\n| extend NvmeOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2019|2022|2025)($|[^0-9])', 'Listed OS family - validate image, generation and boot',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(18[._-]04|20[._-]04|22[._-]04|24[._-]04)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        OsHintText matches regex @'debian[^0-9]{0,30}(11|12)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        'Review official NVMe OS list - not classified by captured subset'),\n         ManaOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2016|2019|2022|2025)($|[^0-9])', 'Listed OS family - install/verify current MANA driver',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(22[._-]04|24[._-]04|26[._-]04)($|[^0-9])', 'Listed OS family - verify minimum kernel and MANA driver',\n        'Review official MANA OS/kernel list - not classified by captured subset')\n| extend NvmeDriverValidation = 'Unknown - guest driver and target boot not tested',\n         ManaDriverValidation = 'Unknown - target hardware, driver and traffic not tested',\n         NvmeOsReference = 'https://learn.microsoft.com/azure/virtual-machines/enable-nvme-interface',\n         ManaOsReference = 'https://learn.microsoft.com/azure/virtual-network/accelerated-networking-overview',\n         OsReferenceChecked = '2026-11-18'\n| extend ImageProvenance = case(\n        isnotempty(ImageId), 'Custom/gallery image - verify guest drivers',\n        isnotempty(ImagePublisher), 'Marketplace origin - guest changes unverified',\n        'Unknown image lineage - verify guest drivers')\n| extend OsEvidence = case(\n        isnotempty(GuestOsName), strcat('Guest OS metadata: ', GuestOsName),\n        OsType =~ 'Windows' and ImageSku contains '2016', 'Server 2016 image hint - current guest OS unverified',\n        'Guest OS version unverified')\n| extend EncryptionEvidence = iff(DiskAdeConfigured == true,\n        'OS disk encryption configuration detected - guest state unverified',\n        'Guest BitLocker/ADE state unverified')\n| extend ConversionOsCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        GuestOsName contains '2016', '; Server 2016 detected: OS upgrade/rebuild before documented Trusted Launch conversion',\n        isempty(GuestOsName) and ImageSku contains '2016', '; Server 2016 image hint: confirm guest version; upgrade/rebuild if still 2016 before documented Trusted Launch conversion',\n        '; Verify Windows OS eligibility for the chosen conversion route')\n| extend ConversionEncryptionCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        DiskAdeConfigured == true, '; Encryption config detected: address Windows OS encryption before documented Trusted Launch conversion',\n        '; Guest encryption unknown: check BitLocker/ADE before conversion')\n| extend Prerequisites = iff(isempty(RecommendedTarget),\n        'No compatible target in this generation in the captured catalogue - manual selection required',\n        strcat('Generation ', VmGeneration, ': ', Blockers,\n            ConversionOsCheck, ConversionEncryptionCheck,\n            iff(NeedsGen2 == 1, '; Convert/rebuild to Gen2; validate partition layout and chosen route; Backup/ASR prerequisites apply to Trusted Launch conversion', ''),\n            iff(PenNvme > 0 and isnotempty(DiskControllers) and DiskControllers !contains 'NVMe',\n                '; Current OS disk does not advertise NVMe - validate image/disk/boot-driver compatibility', '')))\n| extend Validation = strcat('Catalogue region: ', TargetInRegion, '. ', OsEvidence, '. ',\n        EncryptionEvidence, '. ', ImageProvenance,\n        '. ', NvmeOsHint, '. ', ManaOsHint,\n        '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',\n        'Use Capacity / quota for the default V5-first fleet model; that result is not a V6-path quota approval.',\n        iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))\n| extend Resource = strcat(Name, ' [', VmSize, ']'),\n         Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),\n         ConversionRequired = iff(isempty(RecommendedTarget) or VmGeneration == 'Unknown', tobool(''), NeedsGen2 == 1),\n         NvmeRequired = iff(isempty(RecommendedTarget), tobool(''), PenNvme > 0)\n| extend TargetSelection = iff(isempty(RecommendedTarget), 'Not met', 'Met'),\n         GenerationSupport = case(isempty(RecommendedTarget) or VmGeneration == 'Unknown', 'Unknown',\n             NeedsGen2 == 1, 'Not met', 'Met'),\n         ConversionOS = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             GuestOsName contains '2016', 'Not met', 'Unknown'),\n         ConversionEncryption = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             DiskAdeConfigured == true, 'Not met', 'Unknown'),\n         NvmeBoot = case(isempty(RecommendedTarget), 'Unknown',\n             PenNvme == 0, 'Not applicable',\n             isnotempty(DiskControllers) and DiskControllers !contains 'NVMe', 'Not met', 'Unknown'),\n         ManaNetworking = 'Unknown',\n         Architecture = case(isempty(RecommendedTarget), 'Unknown', PenArch > 0, 'Not met', 'Met'),\n         MemoryCapacity = case(isempty(RecommendedTarget) or isnull(toreal(TargetMemoryGB)) or isnull(CurrentMemoryGB), 'Unknown',\n             PenMem > 0, 'Not met', 'Met'),\n         LocalDisk = case(isempty(RecommendedTarget) or WarnCodes has 'l', 'Unknown',\n             PenTemp > 0, 'Not met', 'Unknown'),\n         CatalogueRegion = case(TargetInRegion == 'Yes', 'Met', TargetInRegion == 'No', 'Not met', 'Unknown'),\n         ZonePlacement = iff(isempty(Zone), 'Not applicable', 'Unknown'),\n         AvailabilitySet = iff(isempty(AvSetId), 'Not applicable', 'Unknown'),\n         ScaleSetModel = iff(IsVmss, 'Unknown', 'Not applicable'),\n         DiskLimits = 'Unknown', NicLimits = 'Unknown',\n         Quota = 'Unknown', Policy = 'Unknown', AllocationCapacity = 'Unknown',\n         Backup = 'Unknown',\n         AsrConversion = case(isempty(RecommendedTarget), 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),\n         ApplicationValidation = 'Unknown', Rollback = 'Unknown'\n| project Resource, Target, TargetSelection, GenerationSupport, ConversionOS,\n          ConversionEncryption, NvmeBoot, ManaNetworking, Architecture, MemoryCapacity,\n          LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,\n          DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,\n          ApplicationValidation, Rollback,\n          Prerequisites, Validation, ResourceId,\n          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence,\n          OsHintSource, NvmeOsHint, ManaOsHint, NvmeDriverValidation, ManaDriverValidation,\n          NvmeOsReference, ManaOsReference, OsReferenceChecked\n| order by Resource asc",
+                          "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{V5PathSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| where Lifecycle != 'OPTIONAL'\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{V5PathRegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{V5PathRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// This series-wide cutoff is not a customer's reservation expiry or billing coverage.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',\n        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',\n        'Series purchase/renewal cutoff upcoming; coverage not assessed')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Few scored platform changes - validation required',\n        ReadinessScore >= 60, 'Moderate scored platform changes',\n        ReadinessScore >= 35, 'Substantial scored platform changes',\n        'Major scored platform changes')\n| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| extend OsHintSource = iff(isnotempty(GuestOsName), 'Guest OS metadata', 'Image hint only - current guest unverified'),\n         OsHintText = tolower(iff(isnotempty(GuestOsName), GuestOsName, strcat(ImagePublisher, ' ', ImageOffer, ' ', ImageSku)))\n| extend NvmeOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2019|2022|2025)($|[^0-9])', 'Listed OS family - validate image, generation and boot',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(18[._-]04|20[._-]04|22[._-]04|24[._-]04)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        OsHintText matches regex @'debian[^0-9]{0,30}(11|12)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        'Review official NVMe OS list - not classified by captured subset'),\n         ManaOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2016|2019|2022|2025)($|[^0-9])', 'Listed OS family - install/verify current MANA driver',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(22[._-]04|24[._-]04|26[._-]04)($|[^0-9])', 'Listed OS family - verify minimum kernel and MANA driver',\n        'Review official MANA OS/kernel list - not classified by captured subset')\n| extend NvmeDriverValidation = 'Unknown - guest driver and target boot not tested',\n         ManaDriverValidation = 'Unknown - target hardware, driver and traffic not tested',\n         NvmeOsReference = 'https://learn.microsoft.com/azure/virtual-machines/enable-nvme-interface',\n         ManaOsReference = 'https://learn.microsoft.com/azure/virtual-network/accelerated-networking-overview',\n         OsReferenceChecked = '2026-11-18'\n| extend ImageProvenance = case(\n        isnotempty(ImageId), 'Custom/gallery image - verify guest drivers',\n        isnotempty(ImagePublisher), 'Marketplace origin - guest changes unverified',\n        'Unknown image lineage - verify guest drivers')\n| extend OsEvidence = case(\n        isnotempty(GuestOsName), strcat('Guest OS metadata: ', GuestOsName),\n        OsType =~ 'Windows' and ImageSku contains '2016', 'Server 2016 image hint - current guest OS unverified',\n        'Guest OS version unverified')\n| extend EncryptionEvidence = iff(DiskAdeConfigured == true,\n        'OS disk encryption configuration detected - guest state unverified',\n        'Guest BitLocker/ADE state unverified')\n| extend ConversionOsCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        GuestOsName contains '2016', '; Server 2016 detected: OS upgrade/rebuild before documented Trusted Launch conversion',\n        isempty(GuestOsName) and ImageSku contains '2016', '; Server 2016 image hint: confirm guest version; upgrade/rebuild if still 2016 before documented Trusted Launch conversion',\n        '; Verify Windows OS eligibility for the chosen conversion route')\n| extend ConversionEncryptionCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        DiskAdeConfigured == true, '; Encryption config detected: address Windows OS encryption before documented Trusted Launch conversion',\n        '; Guest encryption unknown: check BitLocker/ADE before conversion')\n| extend Prerequisites = iff(isempty(RecommendedTarget),\n        'No compatible target in this generation in the captured catalogue - manual selection required',\n        strcat('Generation ', VmGeneration, ': ', Blockers,\n            ConversionOsCheck, ConversionEncryptionCheck,\n            iff(NeedsGen2 == 1, '; Convert/rebuild to Gen2; validate partition layout and chosen route; Backup/ASR prerequisites apply to Trusted Launch conversion', ''),\n            iff(PenNvme > 0 and isnotempty(DiskControllers) and DiskControllers !contains 'NVMe',\n                '; Current OS disk does not advertise NVMe - validate image/disk/boot-driver compatibility', '')))\n| extend Validation = strcat('Catalogue region: ', TargetInRegion, '. ', OsEvidence, '. ',\n        EncryptionEvidence, '. ', ImageProvenance,\n        '. ', NvmeOsHint, '. ', ManaOsHint,\n        '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',\n        'Use Capacity / quota for the default V5-first fleet model; that result is not a V6-path quota approval.',\n        iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))\n| extend Resource = strcat(Name, ' [', VmSize, ']'),\n         Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),\n         ConversionRequired = iff(isempty(RecommendedTarget) or VmGeneration == 'Unknown', tobool(''), NeedsGen2 == 1),\n         NvmeRequired = iff(isempty(RecommendedTarget), tobool(''), PenNvme > 0)\n| extend TargetSelection = iff(isempty(RecommendedTarget), 'Not met', 'Met'),\n         GenerationSupport = case(isempty(RecommendedTarget) or VmGeneration == 'Unknown', 'Unknown',\n             NeedsGen2 == 1, 'Not met', 'Met'),\n         ConversionOS = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             GuestOsName contains '2016', 'Not met', 'Unknown'),\n         ConversionEncryption = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             DiskAdeConfigured == true, 'Not met', 'Unknown'),\n         NvmeBoot = case(isempty(RecommendedTarget), 'Unknown',\n             PenNvme == 0, 'Not applicable',\n             isnotempty(DiskControllers) and DiskControllers !contains 'NVMe', 'Not met', 'Unknown'),\n         ManaNetworking = 'Unknown',\n         Architecture = case(isempty(RecommendedTarget), 'Unknown', PenArch > 0, 'Not met', 'Met'),\n         MemoryCapacity = case(isempty(RecommendedTarget) or isnull(toreal(TargetMemoryGB)) or isnull(CurrentMemoryGB), 'Unknown',\n             PenMem > 0, 'Not met', 'Met'),\n         LocalDisk = case(isempty(RecommendedTarget) or WarnCodes has 'l', 'Unknown',\n             PenTemp > 0, 'Not met', 'Unknown'),\n         CatalogueRegion = case(TargetInRegion == 'Yes', 'Met', TargetInRegion == 'No', 'Not met', 'Unknown'),\n         ZonePlacement = iff(isempty(Zone), 'Not applicable', 'Unknown'),\n         AvailabilitySet = iff(isempty(AvSetId), 'Not applicable', 'Unknown'),\n         ScaleSetModel = iff(IsVmss, 'Unknown', 'Not applicable'),\n         DiskLimits = 'Unknown', NicLimits = 'Unknown',\n         Quota = 'Unknown', Policy = 'Unknown', AllocationCapacity = 'Unknown',\n         Backup = 'Unknown',\n         AsrConversion = case(isempty(RecommendedTarget), 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),\n         ApplicationValidation = 'Unknown', Rollback = 'Unknown'\n\n| extend ChecksNotMet = iff(TargetSelection == 'Not met', 1, 0) + iff(GenerationSupport == 'Not met', 1, 0) + iff(ConversionOS == 'Not met', 1, 0) + iff(ConversionEncryption == 'Not met', 1, 0) + iff(NvmeBoot == 'Not met', 1, 0) + iff(ManaNetworking == 'Not met', 1, 0) + iff(Architecture == 'Not met', 1, 0) + iff(MemoryCapacity == 'Not met', 1, 0) + iff(LocalDisk == 'Not met', 1, 0) + iff(CatalogueRegion == 'Not met', 1, 0) + iff(ZonePlacement == 'Not met', 1, 0) + iff(AvailabilitySet == 'Not met', 1, 0) + iff(ScaleSetModel == 'Not met', 1, 0) + iff(DiskLimits == 'Not met', 1, 0) + iff(NicLimits == 'Not met', 1, 0) + iff(Quota == 'Not met', 1, 0) + iff(Policy == 'Not met', 1, 0) + iff(AllocationCapacity == 'Not met', 1, 0) + iff(Backup == 'Not met', 1, 0) + iff(AsrConversion == 'Not met', 1, 0) + iff(ApplicationValidation == 'Not met', 1, 0) + iff(Rollback == 'Not met', 1, 0),\n         ChecksUnknown = iff(TargetSelection == 'Unknown', 1, 0) + iff(GenerationSupport == 'Unknown', 1, 0) + iff(ConversionOS == 'Unknown', 1, 0) + iff(ConversionEncryption == 'Unknown', 1, 0) + iff(NvmeBoot == 'Unknown', 1, 0) + iff(ManaNetworking == 'Unknown', 1, 0) + iff(Architecture == 'Unknown', 1, 0) + iff(MemoryCapacity == 'Unknown', 1, 0) + iff(LocalDisk == 'Unknown', 1, 0) + iff(CatalogueRegion == 'Unknown', 1, 0) + iff(ZonePlacement == 'Unknown', 1, 0) + iff(AvailabilitySet == 'Unknown', 1, 0) + iff(ScaleSetModel == 'Unknown', 1, 0) + iff(DiskLimits == 'Unknown', 1, 0) + iff(NicLimits == 'Unknown', 1, 0) + iff(Quota == 'Unknown', 1, 0) + iff(Policy == 'Unknown', 1, 0) + iff(AllocationCapacity == 'Unknown', 1, 0) + iff(Backup == 'Unknown', 1, 0) + iff(AsrConversion == 'Unknown', 1, 0) + iff(ApplicationValidation == 'Unknown', 1, 0) + iff(Rollback == 'Unknown', 1, 0)\n| extend Review = 'All 22 checks'\n| project Resource, Target, GenerationSupport, NvmeBoot, ManaNetworking,\n          ChecksNotMet, ChecksUnknown, Review, TargetSelection, ConversionOS,\n          ConversionEncryption, Architecture, MemoryCapacity,\n          LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,\n          DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,\n          ApplicationValidation, Rollback,\n          Prerequisites, Validation, ResourceId,\n          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence,\n          OsHintSource, NvmeOsHint, ManaOsHint, NvmeDriverValidation, ManaDriverValidation,\n          NvmeOsReference, ManaOsReference, OsReferenceChecked\n| order by Resource asc",
                           "size": 1,
                           "queryType": 1,
                           "resourceType": "microsoft.resourcegraph/resources",
@@ -1648,7 +1670,7 @@
                           ],
                           "visualization": "table",
                           "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
-                          "title": "V5 targets and prerequisites",
+                          "title": "V5 targets - select All 22 checks for per-VM details",
                           "gridSettings": {
                             "formatters": [
                               {
@@ -1658,186 +1680,98 @@
                                   "linkColumn": "ResourceId",
                                   "linkTarget": "Resource",
                                   "linkIsContextBlade": true,
-                                  "customColumnWidthSetting": "28ch"
+                                  "customColumnWidthSetting": "20%"
                                 }
                               },
                               {
                                 "columnMatch": "Target",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "24ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "TargetSelection",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "19%"
                                 }
                               },
                               {
                                 "columnMatch": "GenerationSupport",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ConversionOS",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ConversionEncryption",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "10%"
                                 }
                               },
                               {
                                 "columnMatch": "NvmeBoot",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
                                 "columnMatch": "ManaNetworking",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
-                                "columnMatch": "Architecture",
-                                "formatter": 0,
+                                "columnMatch": "ChecksNotMet",
+                                "formatter": 18,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "thresholdsOptions": "colors",
+                                  "thresholdsGrid": [
+                                    {
+                                      "operator": ">",
+                                      "thresholdValue": 0,
+                                      "representation": "red",
+                                      "text": "{0}{1}"
+                                    },
+                                    {
+                                      "operator": "Default",
+                                      "representation": "gray",
+                                      "text": "{0}{1}"
+                                    }
+                                  ],
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
-                                "columnMatch": "MemoryCapacity",
-                                "formatter": 0,
+                                "columnMatch": "ChecksUnknown",
+                                "formatter": 18,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "thresholdsOptions": "colors",
+                                  "thresholdsGrid": [
+                                    {
+                                      "operator": ">",
+                                      "thresholdValue": 0,
+                                      "representation": "orange",
+                                      "text": "{0}{1}"
+                                    },
+                                    {
+                                      "operator": "Default",
+                                      "representation": "gray",
+                                      "text": "{0}{1}"
+                                    }
+                                  ],
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
-                                "columnMatch": "LocalDisk",
-                                "formatter": 0,
+                                "columnMatch": "Review",
+                                "formatter": 1,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "CatalogueRegion",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ZonePlacement",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "AvailabilitySet",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ScaleSetModel",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "DiskLimits",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "NicLimits",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Quota",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Policy",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "AllocationCapacity",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Backup",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "AsrConversion",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ApplicationValidation",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Rollback",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Prerequisites",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "70ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Validation",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "70ch"
+                                  "linkTarget": "GenericDetails",
+                                  "linkIsContextBlade": true,
+                                  "customColumnWidthSetting": "15%"
                                 }
                               },
                               {
                                 "columnMatch": "ResourceId",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Prerequisites",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Validation",
                                 "formatter": 5
                               },
                               {
@@ -1895,6 +1829,82 @@
                               {
                                 "columnMatch": "OsReferenceChecked",
                                 "formatter": 5
+                              },
+                              {
+                                "columnMatch": "TargetSelection",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ConversionOS",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ConversionEncryption",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Architecture",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "MemoryCapacity",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "LocalDisk",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "CatalogueRegion",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ZonePlacement",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "AvailabilitySet",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ScaleSetModel",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "DiskLimits",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "NicLimits",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Quota",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Policy",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "AllocationCapacity",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Backup",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "AsrConversion",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ApplicationValidation",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Rollback",
+                                "formatter": 5
                               }
                             ],
                             "rowLimit": 10,
@@ -1908,7 +1918,7 @@
                       {
                         "type": 1,
                         "content": {
-                          "json": "**Status legend:** Met = observed/captured evidence meets this specific check; Not met = observed mismatch; Unknown = validation evidence missing; Not applicable = this target/route does not trigger the check. Scroll horizontally or export for all prerequisite columns. Catalogue matches are not guest certification or a live capacity guarantee. The OS/encryption checks describe the documented Trusted Launch conversion route, not every rebuild.\n\n**Before a v5 resize**\n\n- Confirm the target supports the actual VM generation and existing controller.\n- Validate MANA/accelerated networking on target hardware independently of NVMe.\n- Check OS/image support, ADE restrictions, disk/NIC limits and local-disk capacity/performance.\n- Check subscription quota, restrictions, policy, zone/cluster availability and downtime.\n- Take recoverable backups; test applications and rollback.\n\nGen1, Server 2016 and ADE are not blanket v5 blockers."
+                          "json": "**Status legend:** Met = observed/captured evidence meets this specific check; Not met = observed mismatch; Unknown = validation evidence missing; Not applicable = this target/route does not trigger the check. Use **All 22 checks** for vertically listed statuses/evidence, or export for every prerequisite column. See the column key below. Catalogue matches are not guest certification or a live capacity guarantee. The OS/encryption checks describe the documented Trusted Launch conversion route, not every rebuild.\n\n**Before a v5 resize**\n\n- Confirm the target supports the actual VM generation and existing controller.\n- Validate MANA/accelerated networking on target hardware independently of NVMe.\n- Check OS/image support, ADE restrictions, disk/NIC limits and local-disk capacity/performance.\n- Check subscription quota, restrictions, policy, zone/cluster availability and downtime.\n- Take recoverable backups; test applications and rollback.\n\nGen1, Server 2016 and ADE are not blanket v5 blockers."
                         },
                         "name": "path-v5-checklist",
                         "styleSettings": {
@@ -1922,7 +1932,7 @@
                 {
                   "type": 12,
                   "name": "path-v6-panel",
-                  "customWidth": "50",
+                  "customWidth": "100",
                   "content": {
                     "version": "NotebookGroup/1.0",
                     "groupType": "editable",
@@ -1942,7 +1952,7 @@
                         "type": 3,
                         "content": {
                           "version": "KqlItem/1.0",
-                          "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{V6PathSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| where Lifecycle != 'OPTIONAL'\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{V6PathRegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{V6PathRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// This series-wide cutoff is not a customer's reservation expiry or billing coverage.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',\n        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',\n        'Series purchase/renewal cutoff upcoming; coverage not assessed')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Few scored platform changes - validation required',\n        ReadinessScore >= 60, 'Moderate scored platform changes',\n        ReadinessScore >= 35, 'Substantial scored platform changes',\n        'Major scored platform changes')\n| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| extend OsHintSource = iff(isnotempty(GuestOsName), 'Guest OS metadata', 'Image hint only - current guest unverified'),\n         OsHintText = tolower(iff(isnotempty(GuestOsName), GuestOsName, strcat(ImagePublisher, ' ', ImageOffer, ' ', ImageSku)))\n| extend NvmeOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2019|2022|2025)($|[^0-9])', 'Listed OS family - validate image, generation and boot',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(18[._-]04|20[._-]04|22[._-]04|24[._-]04)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        OsHintText matches regex @'debian[^0-9]{0,30}(11|12)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        'Review official NVMe OS list - not classified by captured subset'),\n         ManaOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2016|2019|2022|2025)($|[^0-9])', 'Listed OS family - install/verify current MANA driver',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(22[._-]04|24[._-]04|26[._-]04)($|[^0-9])', 'Listed OS family - verify minimum kernel and MANA driver',\n        'Review official MANA OS/kernel list - not classified by captured subset')\n| extend NvmeDriverValidation = 'Unknown - guest driver and target boot not tested',\n         ManaDriverValidation = 'Unknown - target hardware, driver and traffic not tested',\n         NvmeOsReference = 'https://learn.microsoft.com/azure/virtual-machines/enable-nvme-interface',\n         ManaOsReference = 'https://learn.microsoft.com/azure/virtual-network/accelerated-networking-overview',\n         OsReferenceChecked = '2026-11-18'\n| extend ImageProvenance = case(\n        isnotempty(ImageId), 'Custom/gallery image - verify guest drivers',\n        isnotempty(ImagePublisher), 'Marketplace origin - guest changes unverified',\n        'Unknown image lineage - verify guest drivers')\n| extend OsEvidence = case(\n        isnotempty(GuestOsName), strcat('Guest OS metadata: ', GuestOsName),\n        OsType =~ 'Windows' and ImageSku contains '2016', 'Server 2016 image hint - current guest OS unverified',\n        'Guest OS version unverified')\n| extend EncryptionEvidence = iff(DiskAdeConfigured == true,\n        'OS disk encryption configuration detected - guest state unverified',\n        'Guest BitLocker/ADE state unverified')\n| extend ConversionOsCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        GuestOsName contains '2016', '; Server 2016 detected: OS upgrade/rebuild before documented Trusted Launch conversion',\n        isempty(GuestOsName) and ImageSku contains '2016', '; Server 2016 image hint: confirm guest version; upgrade/rebuild if still 2016 before documented Trusted Launch conversion',\n        '; Verify Windows OS eligibility for the chosen conversion route')\n| extend ConversionEncryptionCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        DiskAdeConfigured == true, '; Encryption config detected: address Windows OS encryption before documented Trusted Launch conversion',\n        '; Guest encryption unknown: check BitLocker/ADE before conversion')\n| extend Prerequisites = iff(isempty(RecommendedTarget),\n        'No compatible target in this generation in the captured catalogue - manual selection required',\n        strcat('Generation ', VmGeneration, ': ', Blockers,\n            ConversionOsCheck, ConversionEncryptionCheck,\n            iff(NeedsGen2 == 1, '; Convert/rebuild to Gen2; validate partition layout and chosen route; Backup/ASR prerequisites apply to Trusted Launch conversion', ''),\n            iff(PenNvme > 0 and isnotempty(DiskControllers) and DiskControllers !contains 'NVMe',\n                '; Current OS disk does not advertise NVMe - validate image/disk/boot-driver compatibility', '')))\n| extend Validation = strcat('Catalogue region: ', TargetInRegion, '. ', OsEvidence, '. ',\n        EncryptionEvidence, '. ', ImageProvenance,\n        '. ', NvmeOsHint, '. ', ManaOsHint,\n        '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',\n        'Use Capacity / quota for the default V5-first fleet model; that result is not a V6-path quota approval.',\n        iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))\n| extend Resource = strcat(Name, ' [', VmSize, ']'),\n         Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),\n         ConversionRequired = iff(isempty(RecommendedTarget) or VmGeneration == 'Unknown', tobool(''), NeedsGen2 == 1),\n         NvmeRequired = iff(isempty(RecommendedTarget), tobool(''), PenNvme > 0)\n| extend TargetSelection = iff(isempty(RecommendedTarget), 'Not met', 'Met'),\n         GenerationSupport = case(isempty(RecommendedTarget) or VmGeneration == 'Unknown', 'Unknown',\n             NeedsGen2 == 1, 'Not met', 'Met'),\n         ConversionOS = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             GuestOsName contains '2016', 'Not met', 'Unknown'),\n         ConversionEncryption = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             DiskAdeConfigured == true, 'Not met', 'Unknown'),\n         NvmeBoot = case(isempty(RecommendedTarget), 'Unknown',\n             PenNvme == 0, 'Not applicable',\n             isnotempty(DiskControllers) and DiskControllers !contains 'NVMe', 'Not met', 'Unknown'),\n         ManaNetworking = 'Unknown',\n         Architecture = case(isempty(RecommendedTarget), 'Unknown', PenArch > 0, 'Not met', 'Met'),\n         MemoryCapacity = case(isempty(RecommendedTarget) or isnull(toreal(TargetMemoryGB)) or isnull(CurrentMemoryGB), 'Unknown',\n             PenMem > 0, 'Not met', 'Met'),\n         LocalDisk = case(isempty(RecommendedTarget) or WarnCodes has 'l', 'Unknown',\n             PenTemp > 0, 'Not met', 'Unknown'),\n         CatalogueRegion = case(TargetInRegion == 'Yes', 'Met', TargetInRegion == 'No', 'Not met', 'Unknown'),\n         ZonePlacement = iff(isempty(Zone), 'Not applicable', 'Unknown'),\n         AvailabilitySet = iff(isempty(AvSetId), 'Not applicable', 'Unknown'),\n         ScaleSetModel = iff(IsVmss, 'Unknown', 'Not applicable'),\n         DiskLimits = 'Unknown', NicLimits = 'Unknown',\n         Quota = 'Unknown', Policy = 'Unknown', AllocationCapacity = 'Unknown',\n         Backup = 'Unknown',\n         AsrConversion = case(isempty(RecommendedTarget), 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),\n         ApplicationValidation = 'Unknown', Rollback = 'Unknown'\n| project Resource, Target, TargetSelection, GenerationSupport, ConversionOS,\n          ConversionEncryption, NvmeBoot, ManaNetworking, Architecture, MemoryCapacity,\n          LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,\n          DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,\n          ApplicationValidation, Rollback,\n          Prerequisites, Validation, ResourceId,\n          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence,\n          OsHintSource, NvmeOsHint, ManaOsHint, NvmeDriverValidation, ManaDriverValidation,\n          NvmeOsReference, ManaOsReference, OsReferenceChecked\n| order by Resource asc",
+                          "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{V6PathSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| where Lifecycle != 'OPTIONAL'\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{V6PathRegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{V6PathRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// This series-wide cutoff is not a customer's reservation expiry or billing coverage.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',\n        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',\n        'Series purchase/renewal cutoff upcoming; coverage not assessed')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Few scored platform changes - validation required',\n        ReadinessScore >= 60, 'Moderate scored platform changes',\n        ReadinessScore >= 35, 'Substantial scored platform changes',\n        'Major scored platform changes')\n| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| extend OsHintSource = iff(isnotempty(GuestOsName), 'Guest OS metadata', 'Image hint only - current guest unverified'),\n         OsHintText = tolower(iff(isnotempty(GuestOsName), GuestOsName, strcat(ImagePublisher, ' ', ImageOffer, ' ', ImageSku)))\n| extend NvmeOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2019|2022|2025)($|[^0-9])', 'Listed OS family - validate image, generation and boot',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(18[._-]04|20[._-]04|22[._-]04|24[._-]04)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        OsHintText matches regex @'debian[^0-9]{0,30}(11|12)($|[^0-9])', 'Listed OS family - validate image, kernel and boot',\n        'Review official NVMe OS list - not classified by captured subset'),\n         ManaOsHint = case(\n        isempty(trim(' ', OsHintText)), 'Unknown - OS metadata missing',\n        OsHintText matches regex @'windows.?server[^0-9]{0,30}(2016|2019|2022|2025)($|[^0-9])', 'Listed OS family - install/verify current MANA driver',\n        OsHintText matches regex @'ubuntu[^0-9]{0,30}(22[._-]04|24[._-]04|26[._-]04)($|[^0-9])', 'Listed OS family - verify minimum kernel and MANA driver',\n        'Review official MANA OS/kernel list - not classified by captured subset')\n| extend NvmeDriverValidation = 'Unknown - guest driver and target boot not tested',\n         ManaDriverValidation = 'Unknown - target hardware, driver and traffic not tested',\n         NvmeOsReference = 'https://learn.microsoft.com/azure/virtual-machines/enable-nvme-interface',\n         ManaOsReference = 'https://learn.microsoft.com/azure/virtual-network/accelerated-networking-overview',\n         OsReferenceChecked = '2026-11-18'\n| extend ImageProvenance = case(\n        isnotempty(ImageId), 'Custom/gallery image - verify guest drivers',\n        isnotempty(ImagePublisher), 'Marketplace origin - guest changes unverified',\n        'Unknown image lineage - verify guest drivers')\n| extend OsEvidence = case(\n        isnotempty(GuestOsName), strcat('Guest OS metadata: ', GuestOsName),\n        OsType =~ 'Windows' and ImageSku contains '2016', 'Server 2016 image hint - current guest OS unverified',\n        'Guest OS version unverified')\n| extend EncryptionEvidence = iff(DiskAdeConfigured == true,\n        'OS disk encryption configuration detected - guest state unverified',\n        'Guest BitLocker/ADE state unverified')\n| extend ConversionOsCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        GuestOsName contains '2016', '; Server 2016 detected: OS upgrade/rebuild before documented Trusted Launch conversion',\n        isempty(GuestOsName) and ImageSku contains '2016', '; Server 2016 image hint: confirm guest version; upgrade/rebuild if still 2016 before documented Trusted Launch conversion',\n        '; Verify Windows OS eligibility for the chosen conversion route')\n| extend ConversionEncryptionCheck = case(\n        OsType !~ 'Windows' or NeedsGen2 == 0, '',\n        DiskAdeConfigured == true, '; Encryption config detected: address Windows OS encryption before documented Trusted Launch conversion',\n        '; Guest encryption unknown: check BitLocker/ADE before conversion')\n| extend Prerequisites = iff(isempty(RecommendedTarget),\n        'No compatible target in this generation in the captured catalogue - manual selection required',\n        strcat('Generation ', VmGeneration, ': ', Blockers,\n            ConversionOsCheck, ConversionEncryptionCheck,\n            iff(NeedsGen2 == 1, '; Convert/rebuild to Gen2; validate partition layout and chosen route; Backup/ASR prerequisites apply to Trusted Launch conversion', ''),\n            iff(PenNvme > 0 and isnotempty(DiskControllers) and DiskControllers !contains 'NVMe',\n                '; Current OS disk does not advertise NVMe - validate image/disk/boot-driver compatibility', '')))\n| extend Validation = strcat('Catalogue region: ', TargetInRegion, '. ', OsEvidence, '. ',\n        EncryptionEvidence, '. ', ImageProvenance,\n        '. ', NvmeOsHint, '. ', ManaOsHint,\n        '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',\n        'Use Capacity / quota for the default V5-first fleet model; that result is not a V6-path quota approval.',\n        iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))\n| extend Resource = strcat(Name, ' [', VmSize, ']'),\n         Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),\n         ConversionRequired = iff(isempty(RecommendedTarget) or VmGeneration == 'Unknown', tobool(''), NeedsGen2 == 1),\n         NvmeRequired = iff(isempty(RecommendedTarget), tobool(''), PenNvme > 0)\n| extend TargetSelection = iff(isempty(RecommendedTarget), 'Not met', 'Met'),\n         GenerationSupport = case(isempty(RecommendedTarget) or VmGeneration == 'Unknown', 'Unknown',\n             NeedsGen2 == 1, 'Not met', 'Met'),\n         ConversionOS = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             GuestOsName contains '2016', 'Not met', 'Unknown'),\n         ConversionEncryption = case(isempty(RecommendedTarget), 'Unknown',\n             isempty(OsType) and WarnCodes has 'g' and VmGeneration != 'V2', 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2' or OsType !~ 'Windows', 'Not applicable',\n             VmGeneration == 'Unknown', 'Unknown',\n             DiskAdeConfigured == true, 'Not met', 'Unknown'),\n         NvmeBoot = case(isempty(RecommendedTarget), 'Unknown',\n             PenNvme == 0, 'Not applicable',\n             isnotempty(DiskControllers) and DiskControllers !contains 'NVMe', 'Not met', 'Unknown'),\n         ManaNetworking = 'Unknown',\n         Architecture = case(isempty(RecommendedTarget), 'Unknown', PenArch > 0, 'Not met', 'Met'),\n         MemoryCapacity = case(isempty(RecommendedTarget) or isnull(toreal(TargetMemoryGB)) or isnull(CurrentMemoryGB), 'Unknown',\n             PenMem > 0, 'Not met', 'Met'),\n         LocalDisk = case(isempty(RecommendedTarget) or WarnCodes has 'l', 'Unknown',\n             PenTemp > 0, 'Not met', 'Unknown'),\n         CatalogueRegion = case(TargetInRegion == 'Yes', 'Met', TargetInRegion == 'No', 'Not met', 'Unknown'),\n         ZonePlacement = iff(isempty(Zone), 'Not applicable', 'Unknown'),\n         AvailabilitySet = iff(isempty(AvSetId), 'Not applicable', 'Unknown'),\n         ScaleSetModel = iff(IsVmss, 'Unknown', 'Not applicable'),\n         DiskLimits = 'Unknown', NicLimits = 'Unknown',\n         Quota = 'Unknown', Policy = 'Unknown', AllocationCapacity = 'Unknown',\n         Backup = 'Unknown',\n         AsrConversion = case(isempty(RecommendedTarget), 'Unknown',\n             not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),\n         ApplicationValidation = 'Unknown', Rollback = 'Unknown'\n\n| extend ChecksNotMet = iff(TargetSelection == 'Not met', 1, 0) + iff(GenerationSupport == 'Not met', 1, 0) + iff(ConversionOS == 'Not met', 1, 0) + iff(ConversionEncryption == 'Not met', 1, 0) + iff(NvmeBoot == 'Not met', 1, 0) + iff(ManaNetworking == 'Not met', 1, 0) + iff(Architecture == 'Not met', 1, 0) + iff(MemoryCapacity == 'Not met', 1, 0) + iff(LocalDisk == 'Not met', 1, 0) + iff(CatalogueRegion == 'Not met', 1, 0) + iff(ZonePlacement == 'Not met', 1, 0) + iff(AvailabilitySet == 'Not met', 1, 0) + iff(ScaleSetModel == 'Not met', 1, 0) + iff(DiskLimits == 'Not met', 1, 0) + iff(NicLimits == 'Not met', 1, 0) + iff(Quota == 'Not met', 1, 0) + iff(Policy == 'Not met', 1, 0) + iff(AllocationCapacity == 'Not met', 1, 0) + iff(Backup == 'Not met', 1, 0) + iff(AsrConversion == 'Not met', 1, 0) + iff(ApplicationValidation == 'Not met', 1, 0) + iff(Rollback == 'Not met', 1, 0),\n         ChecksUnknown = iff(TargetSelection == 'Unknown', 1, 0) + iff(GenerationSupport == 'Unknown', 1, 0) + iff(ConversionOS == 'Unknown', 1, 0) + iff(ConversionEncryption == 'Unknown', 1, 0) + iff(NvmeBoot == 'Unknown', 1, 0) + iff(ManaNetworking == 'Unknown', 1, 0) + iff(Architecture == 'Unknown', 1, 0) + iff(MemoryCapacity == 'Unknown', 1, 0) + iff(LocalDisk == 'Unknown', 1, 0) + iff(CatalogueRegion == 'Unknown', 1, 0) + iff(ZonePlacement == 'Unknown', 1, 0) + iff(AvailabilitySet == 'Unknown', 1, 0) + iff(ScaleSetModel == 'Unknown', 1, 0) + iff(DiskLimits == 'Unknown', 1, 0) + iff(NicLimits == 'Unknown', 1, 0) + iff(Quota == 'Unknown', 1, 0) + iff(Policy == 'Unknown', 1, 0) + iff(AllocationCapacity == 'Unknown', 1, 0) + iff(Backup == 'Unknown', 1, 0) + iff(AsrConversion == 'Unknown', 1, 0) + iff(ApplicationValidation == 'Unknown', 1, 0) + iff(Rollback == 'Unknown', 1, 0)\n| extend Review = 'All 22 checks'\n| project Resource, Target, GenerationSupport, NvmeBoot, ManaNetworking,\n          ChecksNotMet, ChecksUnknown, Review, TargetSelection, ConversionOS,\n          ConversionEncryption, Architecture, MemoryCapacity,\n          LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,\n          DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,\n          ApplicationValidation, Rollback,\n          Prerequisites, Validation, ResourceId,\n          VmGeneration, ConversionRequired, NvmeRequired, ImageProvenance, OsEvidence, EncryptionEvidence,\n          OsHintSource, NvmeOsHint, ManaOsHint, NvmeDriverValidation, ManaDriverValidation,\n          NvmeOsReference, ManaOsReference, OsReferenceChecked\n| order by Resource asc",
                           "size": 1,
                           "queryType": 1,
                           "resourceType": "microsoft.resourcegraph/resources",
@@ -1951,7 +1961,7 @@
                           ],
                           "visualization": "table",
                           "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
-                          "title": "V6 targets and prerequisites",
+                          "title": "V6 targets - select All 22 checks for per-VM details",
                           "gridSettings": {
                             "formatters": [
                               {
@@ -1961,186 +1971,98 @@
                                   "linkColumn": "ResourceId",
                                   "linkTarget": "Resource",
                                   "linkIsContextBlade": true,
-                                  "customColumnWidthSetting": "28ch"
+                                  "customColumnWidthSetting": "20%"
                                 }
                               },
                               {
                                 "columnMatch": "Target",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "24ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "TargetSelection",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "19%"
                                 }
                               },
                               {
                                 "columnMatch": "GenerationSupport",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ConversionOS",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ConversionEncryption",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "10%"
                                 }
                               },
                               {
                                 "columnMatch": "NvmeBoot",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
                                 "columnMatch": "ManaNetworking",
                                 "formatter": 0,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
-                                "columnMatch": "Architecture",
-                                "formatter": 0,
+                                "columnMatch": "ChecksNotMet",
+                                "formatter": 18,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "thresholdsOptions": "colors",
+                                  "thresholdsGrid": [
+                                    {
+                                      "operator": ">",
+                                      "thresholdValue": 0,
+                                      "representation": "red",
+                                      "text": "{0}{1}"
+                                    },
+                                    {
+                                      "operator": "Default",
+                                      "representation": "gray",
+                                      "text": "{0}{1}"
+                                    }
+                                  ],
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
-                                "columnMatch": "MemoryCapacity",
-                                "formatter": 0,
+                                "columnMatch": "ChecksUnknown",
+                                "formatter": 18,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
+                                  "thresholdsOptions": "colors",
+                                  "thresholdsGrid": [
+                                    {
+                                      "operator": ">",
+                                      "thresholdValue": 0,
+                                      "representation": "orange",
+                                      "text": "{0}{1}"
+                                    },
+                                    {
+                                      "operator": "Default",
+                                      "representation": "gray",
+                                      "text": "{0}{1}"
+                                    }
+                                  ],
+                                  "customColumnWidthSetting": "9%"
                                 }
                               },
                               {
-                                "columnMatch": "LocalDisk",
-                                "formatter": 0,
+                                "columnMatch": "Review",
+                                "formatter": 1,
                                 "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "CatalogueRegion",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ZonePlacement",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "AvailabilitySet",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ScaleSetModel",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "DiskLimits",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "NicLimits",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Quota",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Policy",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "AllocationCapacity",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Backup",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "AsrConversion",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "ApplicationValidation",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Rollback",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "20ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Prerequisites",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "70ch"
-                                }
-                              },
-                              {
-                                "columnMatch": "Validation",
-                                "formatter": 0,
-                                "formatOptions": {
-                                  "customColumnWidthSetting": "70ch"
+                                  "linkTarget": "GenericDetails",
+                                  "linkIsContextBlade": true,
+                                  "customColumnWidthSetting": "15%"
                                 }
                               },
                               {
                                 "columnMatch": "ResourceId",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Prerequisites",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Validation",
                                 "formatter": 5
                               },
                               {
@@ -2198,6 +2120,82 @@
                               {
                                 "columnMatch": "OsReferenceChecked",
                                 "formatter": 5
+                              },
+                              {
+                                "columnMatch": "TargetSelection",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ConversionOS",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ConversionEncryption",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Architecture",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "MemoryCapacity",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "LocalDisk",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "CatalogueRegion",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ZonePlacement",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "AvailabilitySet",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ScaleSetModel",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "DiskLimits",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "NicLimits",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Quota",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Policy",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "AllocationCapacity",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Backup",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "AsrConversion",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "ApplicationValidation",
+                                "formatter": 5
+                              },
+                              {
+                                "columnMatch": "Rollback",
+                                "formatter": 5
                               }
                             ],
                             "rowLimit": 10,
@@ -2211,7 +2209,7 @@
                       {
                         "type": 1,
                         "content": {
-                          "json": "**Status legend:** Met = observed/captured evidence meets this specific check; Not met = observed mismatch; Unknown = validation evidence missing; Not applicable = this target/route does not trigger the check. Scroll horizontally or export for all prerequisite columns. Catalogue matches are not guest certification or a live capacity guarantee. The OS/encryption checks describe the documented Trusted Launch conversion route, not every rebuild.\n\n**Before a v6 migration**\n\n- For a Gen2-only target, convert or rebuild Gen1 guests; confirm supported OS and partition/EFI layout.\n- For [Gen1-to-Trusted-Launch conversion](https://learn.microsoft.com/azure/virtual-machines/trusted-launch-existing-vm-gen-1), check Server 2016 exclusion, Windows OS encryption, Backup policy and ASR prerequisites. Rebuilding is a separate route.\n- If required, validate NVMe image/disk capability, boot-critical driver and an actual converted-disk boot.\n- Validate MANA hardware, driver and traffic separately; custom image origin is not proof of a missing driver.\n- Confirm local-disk capacity/performance, disk/NIC limits, quota/policy/zone/cluster availability, applications and rollback."
+                          "json": "**Status legend:** Met = observed/captured evidence meets this specific check; Not met = observed mismatch; Unknown = validation evidence missing; Not applicable = this target/route does not trigger the check. Use **All 22 checks** for vertically listed statuses/evidence, or export for every prerequisite column. See the column key below. Catalogue matches are not guest certification or a live capacity guarantee. The OS/encryption checks describe the documented Trusted Launch conversion route, not every rebuild.\n\n**Before a v6 migration**\n\n- For a Gen2-only target, convert or rebuild Gen1 guests; confirm supported OS and partition/EFI layout.\n- For [Gen1-to-Trusted-Launch conversion](https://learn.microsoft.com/azure/virtual-machines/trusted-launch-existing-vm-gen-1), check Server 2016 exclusion, Windows OS encryption, Backup policy and ASR prerequisites. Rebuilding is a separate route.\n- If required, validate NVMe image/disk capability, boot-critical driver and an actual converted-disk boot.\n- Validate MANA hardware, driver and traffic separately; custom image origin is not proof of a missing driver.\n- Confirm local-disk capacity/performance, disk/NIC limits, quota/policy/zone/cluster availability, applications and rollback."
                         },
                         "name": "path-v6-checklist",
                         "styleSettings": {
@@ -2225,7 +2223,18 @@
                 {
                   "type": 1,
                   "content": {
-                    "json": "## Live target eligibility inspection\n\nChoose a path, then **select a resource row**. The read-only Compute SKU API returns the exact catalogued target's current subscription/region record, full restriction objects, zones and capabilities. A missing target or failed API request is **Unknown**, not an unsupported SKU or a passed check. No row means no eligibility evidence.\n\nInspect each restriction's **type, reasonCode, restrictionInfo.locations and zones** against the selected placement. A zonal restriction is not automatically a regional block. An empty restriction list means no SKU restriction was returned, not quota, policy, cluster-resize compatibility or physical allocation approval. Compare current capabilities with NIC/data-disk counts in Workload discovery. Clear/reselect a resource after changing the path; the details below always name the selected target.\n\nCurrent selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, region **{LiveRegion}**, source zone **{LiveZone}**. This inspector does not change the captured catalogue, recommendations or prerequisite statuses."
+                    "json": "### Assessment column and status key\n\nThe compact grids show the resource, target, generation, NVMe and MANA checks, plus **ChecksNotMet** (observed mismatches across all 22 checks) and **ChecksUnknown** (missing evidence across all 22). Click **All 22 checks** for that VM's vertically listed statuses and evidence. Export retains every prerequisite as its own column. Zero mismatches is not approval when evidence remains Unknown.\n\n| Status | Meaning and example |\n| --- | --- |\n| Met | Evidence meets this specific check; e.g. the target supports the observed disk generation. Not migration approval. |\n| Not met | An observed mismatch or unmet prerequisite; e.g. Gen1 against a Gen2-only target. Convert, rebuild or choose another target. |\n| Unknown | Evidence or testing is missing; e.g. a driver/traffic test, quota or application acceptance. Neither a pass nor proof of failure. |\n| Not applicable | This chosen target/route does not trigger the check; e.g. Windows conversion encryption on a route with no conversion. |\n\n| Prerequisite field | What it checks |\n| --- | --- |\n| TargetSelection | A capability-preserving candidate exists in the captured catalogue; not live availability. |\n| GenerationSupport | The actual OS disk generation is supported by this target; Not met means conversion/rebuild is needed. |\n| ConversionOS | Windows OS eligibility for the selected Gen1-to-Trusted-Launch route; observed Server 2016 is Not met. |\n| ConversionEncryption | Windows OS encryption prerequisite for that conversion route; detected ADE configuration is Not met. |\n| NvmeBoot | NVMe image/disk/boot-driver readiness if this target requires it; a real target boot is still required. |\n| ManaNetworking | Target MANA hardware, guest driver and traffic validation; image origin alone cannot pass this. |\n| Architecture | Source and target CPU architecture match. |\n| MemoryCapacity | The selected target preserves source memory capacity. |\n| LocalDisk | Local-disk capacity, persistence assumptions and performance; known removal is Not met, otherwise review. |\n| CatalogueRegion | The target is present in the captured regional snapshot; use Live target availability for current offerability. |\n| ZonePlacement | Current zone compatibility and placement; zonal sources require live validation. |\n| AvailabilitySet | Availability-set placement and resize-cluster constraints, when membership exists. |\n| ScaleSetModel | Scale-set orchestration, upgrade policy and model-level migration, when applicable. |\n| DiskLimits | Attached disk count, IOPS, throughput and target storage limits. |\n| NicLimits | NIC count and target networking limits. |\n| Quota | Regional/family quota for this path; the separate quota report models the default V5-first fleet, not V6 approval. |\n| Policy | Subscription policy and deployment governance approval. |\n| AllocationCapacity | Actual allocation and resize-cluster capacity; the SKU API does not guarantee this. |\n| Backup | Recoverable backup/restore and conversion-route backup policy prerequisites. |\n| AsrConversion | ASR prerequisites when the selected route requires generation conversion. |\n| ApplicationValidation | Owner-approved application, performance, dependency and HA/failover tests. |\n| Rollback | A documented and rehearsed recovery/rollback route. |\n\n**Evidence fields:** Prerequisites explains target-specific actions; Validation lists evidence and remaining work. VmGeneration comes from disk metadata or a labelled image hint; ConversionRequired/NvmeRequired describe the chosen target. OsEvidence, EncryptionEvidence and ImageProvenance are observations/hints, not guest certification. OsHintSource, NvmeOsHint, ManaOsHint and their reference/date fields identify the captured OS guidance. NvmeDriverValidation/ManaDriverValidation remain unverified until tested. ResourceId links back to the Azure resource."
+                  },
+                  "name": "assessment-column-key",
+                  "styleSettings": {
+                    "margin": "0",
+                    "padding": "0"
+                  }
+                },
+                {
+                  "type": 1,
+                  "content": {
+                    "json": "## Live target availability - SKU support and restrictions\n\nChoose a path, then **select a placement combination**, not an individual VM. Each row groups the exact **subscription / region / zone / target SKU** shared by affected resources. This read-only Compute SKU check inspects subscription-specific SKU offerability, advertised regions/zones and restriction records. It does not attempt an allocation or promise physical capacity. A missing target or failed API request is **Unknown**, not an unsupported SKU or a passed check. No row means no eligibility evidence.\n\nInspect each restriction's **type, reasonCode, restrictionInfo.locations and zones** against the selected placement. A zonal restriction is not automatically a regional block. An empty restriction list means no SKU restriction was returned, not quota, policy, cluster-resize compatibility or physical allocation approval. Compare current capabilities with NIC/data-disk counts in Workload discovery. Clear/reselect a combination after changing the path; the details below always name the selected target.\n\n**Placement key:** Regional means no zone was specified; it does not mean every zone is supported. A multi-zone scale-set model contributes a combination for each declared zone; its resources repeat across those rows and its per-zone instance count stays Unknown (blank). Missing/invalid model capacity also keeps the combination's instance count Unknown, never zero. Do not sum those rows as fleet capacity. Missing targets need manual selection.\n\n**Result key:** A returned SKU must advertise the selected region and, for zonal placement, the selected zone. A matching location or zone restriction means restricted for that placement. Advertised placement with no applicable restriction means no SKU restriction returned, **not deployment approval**. The raw record below preserves the evidence; it is not an automatic all-clear. This inspector does not change the captured catalogue, recommendations or prerequisite statuses."
                   },
                   "name": "eligibility-intro",
                   "styleSettings": {
@@ -2284,7 +2293,7 @@
                   "type": 3,
                   "content": {
                     "version": "KqlItem/1.0",
-                    "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// This series-wide cutoff is not a customer's reservation expiry or billing coverage.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',\n        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',\n        'Series purchase/renewal cutoff upcoming; coverage not assessed')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Few scored platform changes - validation required',\n        ReadinessScore >= 60, 'Moderate scored platform changes',\n        ReadinessScore >= 35, 'Substantial scored platform changes',\n        'Major scored platform changes')\n| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| where Lifecycle != 'OPTIONAL'\n| extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',\n         parse_json('{V5PathSkuMap}')[VmSize], parse_json('{V6PathSkuMap}')[VmSize]))\n| extend SelectedTargetSku = tostring(split(PathRecord, '|')[3]), SourceSubscriptionId = SubscriptionId,\n         SourceRegion = Region, SourceZone = Zone\n| project Name, VmSize, SelectedTargetSku, SourceRegion, SourceZone, SourceSubscriptionId, ResourceId\n| order by Name asc",
+                    "query": "resources\n| where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.compute/virtualmachinescalesets'\n| extend IsVmss = (type =~ 'microsoft.compute/virtualmachinescalesets')\n// A Flexible-orchestration scale set surfaces BOTH the scale set (carrying\n// sku.capacity) and every member VM as separate Resource Graph rows. Counting\n// both double-reports the fleet, so member VMs are dropped here and the scale\n// set alone represents them. Uniform scale sets do not expose member VMs at\n// all, so they are unaffected. Flexible is the current Azure default, so this\n// matters for most modern fleets.\n\n| where IsVmss or isempty(tostring(properties.virtualMachineScaleSet.id))\n| extend VmSize = iff(IsVmss, tostring(sku.name), tostring(properties.hardwareProfile.vmSize))\n| extend Instances = iff(IsVmss, toint(sku.capacity), 1)\n| extend OsType = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.osDisk.osType), tostring(properties.storageProfile.osDisk.osType))\n| extend OsDiskId = tolower(tostring(properties.storageProfile.osDisk.managedDisk.id))\n| extend AvSetId = tostring(properties.availabilitySet.id)\n| extend PowerState = tostring(split(tostring(properties.extended.instanceView.powerState.code), '/')[1])\n| extend ComputePriority = iff(IsVmss, tostring(properties.virtualMachineProfile.priority), tostring(properties.priority))\n| extend Zone = tostring(zones[0])\n| extend ImageSku = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku), tostring(properties.storageProfile.imageReference.sku))\n| extend ImageId = iff(IsVmss, tostring(coalesce(properties.virtualMachineProfile.storageProfile.imageReference.id, properties.virtualMachineProfile.storageProfile.imageReference.sharedGalleryImageId, properties.virtualMachineProfile.storageProfile.imageReference.communityGalleryImageId)), tostring(coalesce(properties.storageProfile.imageReference.id, properties.storageProfile.imageReference.sharedGalleryImageId, properties.storageProfile.imageReference.communityGalleryImageId)))\n| extend ImagePublisher = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.publisher), tostring(properties.storageProfile.imageReference.publisher))\n| extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))\n| extend GuestOsName = tostring(properties.extended.instanceView.osName)\n| project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags, PlacementZones = zones\n| join kind=leftouter (\n    resources\n    | where type =~ 'microsoft.compute/disks'\n    | project OsDiskId = tolower(id), DiskGen = tostring(properties.hyperVGeneration),\n              DiskAdeConfigured = tobool(properties.encryptionSettingsCollection.enabled),\n              DiskControllers = tostring(properties.supportedCapabilities.diskControllerTypes)\n  ) on OsDiskId\n| extend VmGeneration = case(\n        isnotempty(DiskGen), DiskGen,\n        ImageSku has 'gen2' or ImageSku has '-g2', 'V2',\n        'Unknown')\n| extend Rec = tostring(parse_json('{LifecycleSkuMap}')[VmSize])\n| where isnotempty(Rec)\n| extend P = split(Rec, '|')\n| extend Lifecycle = tostring(P[0]),\n         SeriesGroup = tostring(P[1]),\n         RetirementDate = tostring(P[2]),\n         RecommendedTarget = tostring(P[3]),\n         MemoryPreservingTarget = tostring(P[4]),\n         TargetVcpu = tostring(P[5]),\n         TargetMemoryGB = tostring(P[6]),\n         CurrentVcpu = toint(P[7]),\n         CurrentMemoryGB = toreal(P[8]),\n         WarnCodes = tostring(P[9]),\n         AlternateTargets = tostring(P[10]),\n         RiEnded = tostring(P[11]),\n         Series = tostring(P[12]),\n         PriceUpdate = tostring(P[13]),\n         MpVcpu = tostring(P[14]),\n         MpMemoryGB = tostring(P[15])\n| where Lifecycle != 'OPTIONAL'\n| extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))\n| extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))\n| extend RegionId = tostring(parse_json('{RegionIdMap}')[tolower(Region)])\n| extend TargetRegions = tostring(parse_json('{TargetRegionMap}')[RecommendedTarget])\n| extend TargetInRegion = case(\n        isempty(RecommendedTarget) or isempty(TargetRegions), 'Unverified',\n        isempty(RegionId), 'Unverified',\n        TargetRegions has strcat('|', RegionId, '|'), 'Yes',\n        'No')\n| extend PriceUpdate2027 = iff(PriceUpdate == '1', 'Yes', 'No')\n// Reserved Instance purchases and renewals for these series ended 2026-07-01.\n// This series-wide cutoff is not a customer's reservation expiry or billing coverage.\n| extend RiEndsOn = iff(isempty(RiEnded), datetime(null), todatetime(RiEnded))\n| extend RiStatus = case(\n        isempty(RiEnded), 'No cutoff in captured catalogue; coverage not assessed',\n        todatetime(RiEnded) < now(), 'Series purchase/renewal cutoff passed; coverage not assessed',\n        'Series purchase/renewal cutoff upcoming; coverage not assessed')\n// ---- readiness penalties, evaluated against the REAL fleet attributes ----\n| extend NeedsGen2 = iff(WarnCodes has 'g' and VmGeneration == 'V1', 1, 0)\n| extend GenUnknown = iff(WarnCodes has 'g' and VmGeneration == 'Unknown', 1, 0)\n| extend PenGen = iff(NeedsGen2 == 1, 45, iff(GenUnknown == 1, 20, 0))\n| extend PenArch = iff(WarnCodes has 'a', 50, 0)\n| extend PenMem = iff(WarnCodes has 'm', 25, 0)\n| extend PenTemp = iff(WarnCodes has 't', 20, 0)\n| extend PenNvme = iff(WarnCodes has 'n', 15, 0)\n| extend PenNarrow = iff(WarnCodes has 'r', 10, 0)\n| extend PenAz = iff(WarnCodes has 'z' and isnotempty(Zone), 10, 0)\n| extend PenVcpu = iff(WarnCodes has 'v', 5, 0)\n| extend PenRegion = iff(TargetInRegion == 'No', 30, 0)\n| extend PenAvSet = iff(isnotempty(AvSetId), 5, 0)\n| extend PenVmss = iff(IsVmss, 5, 0)\n| extend ReadinessScore = toint(iff(100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss < 0, 0, 100 - PenGen - PenArch - PenMem - PenTemp - PenNvme - PenNarrow - PenAz - PenVcpu - PenRegion - PenAvSet - PenVmss))\n| extend Complexity = case(\n        ReadinessScore >= 85, 'Few scored platform changes - validation required',\n        ReadinessScore >= 60, 'Moderate scored platform changes',\n        ReadinessScore >= 35, 'Substantial scored platform changes',\n        'Major scored platform changes')\n| extend MigrationApproval = 'Not assessed - guest, application, HA, backup and rollback evidence required'\n| extend Urgency = case(\n        DaysToRetirement < 0, 'No retirement date',\n        DaysToRetirement <= 180, 'Critical - under 6 months',\n        DaysToRetirement <= 365, 'High - under 12 months',\n        DaysToRetirement <= 730, 'Medium - under 24 months',\n        'Planned - over 24 months')\n| extend ActionCategory = case(\n        Lifecycle == 'RETIRE', 'Retirement announced - action required',\n        Lifecycle == 'EOL', 'End of life - plan migration',\n        'Optional modernization')\n| extend Blockers = trim(', ', strcat(\n        iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),\n        iff(GenUnknown == 1, 'Confirm VM generation, ', ''),\n        iff(PenArch > 0, 'Arm64 port, ', ''),\n        iff(PenMem > 0, 'Memory downgrade, ', ''),\n        iff(PenTemp > 0, 'Temp disk dependency, ', ''),\n        iff(PenNvme > 0, 'NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'MANA/accelerated networking validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(PenRegion > 0, 'Target not in region, ', ''),\n        iff(PenVcpu > 0, 'vCPU count change, ', '')))\n| extend Blockers = iff(isempty(Blockers), 'None identified', Blockers)\n// Size-level considerations, independent of any individual VM's configuration.\n// Used by the size-by-size mapping so rows do not split on per-VM attributes.\n| extend SizeConsiderations = trim(', ', strcat(\n        iff(WarnCodes has 'g', 'Target is Gen2-only, ', ''),\n        iff(WarnCodes has 'a', 'Arm64 architecture change, ', ''),\n        iff(WarnCodes has 'm', 'Memory reduction at same vCPU, ', ''),\n        iff(WarnCodes has 't', 'Local temp disk removed, ', ''),\n        iff(WarnCodes has 'n', 'Target requires NVMe boot validation, ', ''),\n        iff(WarnCodes has 'h', 'Hardware-dependent MANA validation, ', ''),\n        iff(WarnCodes has 'u', 'No suitable v5 target - manual review, ', ''),\n        iff(WarnCodes has 'k', 'No suitable target in this path - manual selection, ', ''),\n        iff(WarnCodes has 'l', 'Target local-disk capacity unverified, ', ''),\n        iff(WarnCodes has 'r', 'Narrow target region footprint, ', ''),\n        iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),\n        iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))\n| extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)\n| extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',\n         parse_json('{V5PathSkuMap}')[VmSize], parse_json('{V6PathSkuMap}')[VmSize]))\n| extend SelectedTargetSku = tostring(split(PathRecord, '|')[3]), SourceSubscriptionId = SubscriptionId,\n         SourceRegion = Region,\n         PlacementOptions = iff(isnull(PlacementZones) or array_length(PlacementZones) == 0,\n                                dynamic(['Regional']), PlacementZones)\n| mv-expand SourceZone = PlacementOptions limit 2000\n| extend SourceZone = tostring(SourceZone),\n         ZoneInstances = iff(array_length(PlacementZones) > 1, tolong(''), tolong(Instances))\n| summarize AffectedResources = count(), KnownInstances = sum(ZoneInstances),\n            MultiZoneModels = countif(array_length(PlacementZones) > 1),\n            UnknownInstanceResources = countif(isnull(ZoneInstances) or ZoneInstances < 0)\n    by SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku\n| extend AffectedInstances = iff(UnknownInstanceResources > 0, tolong(''), KnownInstances)\n| project SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku,\n          AffectedResources, AffectedInstances, MultiZoneModels, UnknownInstanceResources\n| order by SourceSubscriptionId asc, SourceRegion asc, SourceZone asc, SelectedTargetSku asc",
                     "size": 1,
                     "queryType": 1,
                     "resourceType": "microsoft.resourcegraph/resources",
@@ -2293,37 +2302,88 @@
                     ],
                     "visualization": "table",
                     "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
-                    "title": "Select a resource to inspect its V5 or V6 target in the current subscription / region",
+                    "title": "Select one subscription / region / zone / target SKU combination",
                     "gridSettings": {
                       "formatters": [
                         {
-                          "columnMatch": "Name",
+                          "columnMatch": "SourceSubscriptionId",
                           "formatter": 0,
                           "formatOptions": {
-                            "customColumnWidthSetting": "24ch"
+                            "customColumnWidthSetting": "27%"
                           }
                         },
                         {
-                          "columnMatch": "VmSize",
+                          "columnMatch": "SourceRegion",
                           "formatter": 0,
                           "formatOptions": {
-                            "customColumnWidthSetting": "22ch"
+                            "customColumnWidthSetting": "12%"
+                          }
+                        },
+                        {
+                          "columnMatch": "SourceZone",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "10%"
                           }
                         },
                         {
                           "columnMatch": "SelectedTargetSku",
                           "formatter": 0,
                           "formatOptions": {
-                            "customColumnWidthSetting": "24ch"
+                            "customColumnWidthSetting": "25%"
                           }
                         },
                         {
-                          "columnMatch": "ResourceId",
+                          "columnMatch": "AffectedResources",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "13%"
+                          }
+                        },
+                        {
+                          "columnMatch": "AffectedInstances",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "13%"
+                          }
+                        },
+                        {
+                          "columnMatch": "MultiZoneModels",
+                          "formatter": 5
+                        },
+                        {
+                          "columnMatch": "UnknownInstanceResources",
                           "formatter": 5
                         }
                       ],
                       "rowLimit": 10,
-                      "filter": true
+                      "filter": true,
+                      "labelSettings": [
+                        {
+                          "columnId": "SourceSubscriptionId",
+                          "label": "Subscription"
+                        },
+                        {
+                          "columnId": "SourceRegion",
+                          "label": "Region"
+                        },
+                        {
+                          "columnId": "SourceZone",
+                          "label": "Zone / regional"
+                        },
+                        {
+                          "columnId": "SelectedTargetSku",
+                          "label": "Target SKU"
+                        },
+                        {
+                          "columnId": "AffectedResources",
+                          "label": "Resources"
+                        },
+                        {
+                          "columnId": "AffectedInstances",
+                          "label": "Instances (blank = unknown)"
+                        }
+                      ]
                     },
                     "showExportToExcel": true,
                     "exportToExcelOptions": "all",
@@ -2353,6 +2413,17 @@
                   "name": "eligibility-sources"
                 },
                 {
+                  "type": 1,
+                  "content": {
+                    "json": "Current selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, region **{LiveRegion}**, zone / regional **{LiveZone}**. Compare this placement with **LocationAndZones** and the full **Restrictions** below."
+                  },
+                  "name": "eligibility-selection",
+                  "styleSettings": {
+                    "margin": "0",
+                    "padding": "0"
+                  }
+                },
+                {
                   "type": 3,
                   "name": "eligibility-live",
                   "conditionalVisibility": {
@@ -2364,7 +2435,7 @@
                     "version": "KqlItem/1.0",
                     "queryType": 12,
                     "query": "{\"version\": \"ARMEndpoint/1.0\", \"method\": \"GETARRAY\", \"data\": null, \"headers\": [], \"path\": \"/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus?api-version=2021-07-01&$filter=location eq '{LiveRegion}'\", \"urlParams\": [], \"batchDisabled\": false, \"transformers\": [{\"type\": \"jsonpath\", \"settings\": {\"tablePath\": \"$[?(@.resourceType=='virtualMachines' && @.name=='{LiveTarget}')]\", \"columns\": [{\"path\": \"$.name\", \"columnid\": \"Target\"}, {\"path\": \"$.family\", \"columnid\": \"Family\"}, {\"path\": \"$.locations\", \"columnid\": \"Locations\"}, {\"path\": \"$.locationInfo\", \"columnid\": \"LocationAndZones\"}, {\"path\": \"$.restrictions\", \"columnid\": \"Restrictions\"}, {\"path\": \"$.capabilities\", \"columnid\": \"Capabilities\"}]}}]}",
-                    "title": "Live SKU record - inspect placement-specific restrictions; not migration approval",
+                    "title": "Live target availability evidence - advertised zones and placement restrictions",
                     "size": 1,
                     "visualization": "table",
                     "showExportToExcel": true,

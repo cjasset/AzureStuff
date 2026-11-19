@@ -515,7 +515,7 @@ Impacted resources by the actual Hyper-V generation read from each managed OS di
 
 ### `ov-complexity`
 
-Resource and instance counts by migration complexity band, with average readiness.
+Resource and instance counts by populated scored platform-change band, with average platform score; not workload complexity or approval.
 
 - **Visualization:** table
 - **Scope:** `{Subscriptions}`
@@ -653,7 +653,7 @@ Resource and instance counts by migration complexity band, with average readines
 
 ### `ov-commercial`
 
-Series in scope for the 1 February 2027 pricing update and the Reserved Instance position for each.
+Series in scope for the 1 February 2027 pricing update and captured RI purchase/renewal cutoffs; customer coverage not inspected.
 
 - **Visualization:** table
 - **Scope:** `{Subscriptions}`
@@ -1530,7 +1530,7 @@ resources
 
 ### `path-v5-grid`
 
-Left-hand V5 panel: independent v5 target, target-specific prerequisites, OS/encryption/image signals and explicit unknowns.
+Full-width V5 panel: compact status/count summary and per-VM vertical details; all 22 prerequisite statuses and evidence retained in exports.
 
 - **Visualization:** table
 - **Scope:** `{Subscriptions}`
@@ -1749,8 +1749,13 @@ Left-hand V5 panel: independent v5 target, target-specific prerequisites, OS/enc
          AsrConversion = case(isempty(RecommendedTarget), 'Unknown',
              not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),
          ApplicationValidation = 'Unknown', Rollback = 'Unknown'
-| project Resource, Target, TargetSelection, GenerationSupport, ConversionOS,
-          ConversionEncryption, NvmeBoot, ManaNetworking, Architecture, MemoryCapacity,
+
+| extend ChecksNotMet = iff(TargetSelection == 'Not met', 1, 0) + iff(GenerationSupport == 'Not met', 1, 0) + iff(ConversionOS == 'Not met', 1, 0) + iff(ConversionEncryption == 'Not met', 1, 0) + iff(NvmeBoot == 'Not met', 1, 0) + iff(ManaNetworking == 'Not met', 1, 0) + iff(Architecture == 'Not met', 1, 0) + iff(MemoryCapacity == 'Not met', 1, 0) + iff(LocalDisk == 'Not met', 1, 0) + iff(CatalogueRegion == 'Not met', 1, 0) + iff(ZonePlacement == 'Not met', 1, 0) + iff(AvailabilitySet == 'Not met', 1, 0) + iff(ScaleSetModel == 'Not met', 1, 0) + iff(DiskLimits == 'Not met', 1, 0) + iff(NicLimits == 'Not met', 1, 0) + iff(Quota == 'Not met', 1, 0) + iff(Policy == 'Not met', 1, 0) + iff(AllocationCapacity == 'Not met', 1, 0) + iff(Backup == 'Not met', 1, 0) + iff(AsrConversion == 'Not met', 1, 0) + iff(ApplicationValidation == 'Not met', 1, 0) + iff(Rollback == 'Not met', 1, 0),
+         ChecksUnknown = iff(TargetSelection == 'Unknown', 1, 0) + iff(GenerationSupport == 'Unknown', 1, 0) + iff(ConversionOS == 'Unknown', 1, 0) + iff(ConversionEncryption == 'Unknown', 1, 0) + iff(NvmeBoot == 'Unknown', 1, 0) + iff(ManaNetworking == 'Unknown', 1, 0) + iff(Architecture == 'Unknown', 1, 0) + iff(MemoryCapacity == 'Unknown', 1, 0) + iff(LocalDisk == 'Unknown', 1, 0) + iff(CatalogueRegion == 'Unknown', 1, 0) + iff(ZonePlacement == 'Unknown', 1, 0) + iff(AvailabilitySet == 'Unknown', 1, 0) + iff(ScaleSetModel == 'Unknown', 1, 0) + iff(DiskLimits == 'Unknown', 1, 0) + iff(NicLimits == 'Unknown', 1, 0) + iff(Quota == 'Unknown', 1, 0) + iff(Policy == 'Unknown', 1, 0) + iff(AllocationCapacity == 'Unknown', 1, 0) + iff(Backup == 'Unknown', 1, 0) + iff(AsrConversion == 'Unknown', 1, 0) + iff(ApplicationValidation == 'Unknown', 1, 0) + iff(Rollback == 'Unknown', 1, 0)
+| extend Review = 'All 22 checks'
+| project Resource, Target, GenerationSupport, NvmeBoot, ManaNetworking,
+          ChecksNotMet, ChecksUnknown, Review, TargetSelection, ConversionOS,
+          ConversionEncryption, Architecture, MemoryCapacity,
           LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,
           DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,
           ApplicationValidation, Rollback,
@@ -1763,7 +1768,7 @@ Left-hand V5 panel: independent v5 target, target-specific prerequisites, OS/enc
 
 ### `path-v6-grid`
 
-Right-hand V6 panel: independent v6 target, conversion/NVMe prerequisites, OS/encryption/image signals and explicit unknowns.
+Stacked full-width V6 panel: independent target, compact summary and per-VM vertical details; all 22 statuses and conversion/NVMe evidence retained.
 
 - **Visualization:** table
 - **Scope:** `{Subscriptions}`
@@ -1982,8 +1987,13 @@ Right-hand V6 panel: independent v6 target, conversion/NVMe prerequisites, OS/en
          AsrConversion = case(isempty(RecommendedTarget), 'Unknown',
              not(WarnCodes has 'g') or VmGeneration == 'V2', 'Not applicable', 'Unknown'),
          ApplicationValidation = 'Unknown', Rollback = 'Unknown'
-| project Resource, Target, TargetSelection, GenerationSupport, ConversionOS,
-          ConversionEncryption, NvmeBoot, ManaNetworking, Architecture, MemoryCapacity,
+
+| extend ChecksNotMet = iff(TargetSelection == 'Not met', 1, 0) + iff(GenerationSupport == 'Not met', 1, 0) + iff(ConversionOS == 'Not met', 1, 0) + iff(ConversionEncryption == 'Not met', 1, 0) + iff(NvmeBoot == 'Not met', 1, 0) + iff(ManaNetworking == 'Not met', 1, 0) + iff(Architecture == 'Not met', 1, 0) + iff(MemoryCapacity == 'Not met', 1, 0) + iff(LocalDisk == 'Not met', 1, 0) + iff(CatalogueRegion == 'Not met', 1, 0) + iff(ZonePlacement == 'Not met', 1, 0) + iff(AvailabilitySet == 'Not met', 1, 0) + iff(ScaleSetModel == 'Not met', 1, 0) + iff(DiskLimits == 'Not met', 1, 0) + iff(NicLimits == 'Not met', 1, 0) + iff(Quota == 'Not met', 1, 0) + iff(Policy == 'Not met', 1, 0) + iff(AllocationCapacity == 'Not met', 1, 0) + iff(Backup == 'Not met', 1, 0) + iff(AsrConversion == 'Not met', 1, 0) + iff(ApplicationValidation == 'Not met', 1, 0) + iff(Rollback == 'Not met', 1, 0),
+         ChecksUnknown = iff(TargetSelection == 'Unknown', 1, 0) + iff(GenerationSupport == 'Unknown', 1, 0) + iff(ConversionOS == 'Unknown', 1, 0) + iff(ConversionEncryption == 'Unknown', 1, 0) + iff(NvmeBoot == 'Unknown', 1, 0) + iff(ManaNetworking == 'Unknown', 1, 0) + iff(Architecture == 'Unknown', 1, 0) + iff(MemoryCapacity == 'Unknown', 1, 0) + iff(LocalDisk == 'Unknown', 1, 0) + iff(CatalogueRegion == 'Unknown', 1, 0) + iff(ZonePlacement == 'Unknown', 1, 0) + iff(AvailabilitySet == 'Unknown', 1, 0) + iff(ScaleSetModel == 'Unknown', 1, 0) + iff(DiskLimits == 'Unknown', 1, 0) + iff(NicLimits == 'Unknown', 1, 0) + iff(Quota == 'Unknown', 1, 0) + iff(Policy == 'Unknown', 1, 0) + iff(AllocationCapacity == 'Unknown', 1, 0) + iff(Backup == 'Unknown', 1, 0) + iff(AsrConversion == 'Unknown', 1, 0) + iff(ApplicationValidation == 'Unknown', 1, 0) + iff(Rollback == 'Unknown', 1, 0)
+| extend Review = 'All 22 checks'
+| project Resource, Target, GenerationSupport, NvmeBoot, ManaNetworking,
+          ChecksNotMet, ChecksUnknown, Review, TargetSelection, ConversionOS,
+          ConversionEncryption, Architecture, MemoryCapacity,
           LocalDisk, CatalogueRegion, ZonePlacement, AvailabilitySet, ScaleSetModel,
           DiskLimits, NicLimits, Quota, Policy, AllocationCapacity, Backup, AsrConversion,
           ApplicationValidation, Rollback,
@@ -1996,7 +2006,7 @@ Right-hand V6 panel: independent v6 target, conversion/NVMe prerequisites, OS/en
 
 ### `eligibility-sources`
 
-Select an exact V5/V6 target and export its subscription, current region and source zone to the separate read-only Compute SKU API inspector.
+One row per subscription/region/zone/exact V5 or V6 target SKU combination, with affected resource/instance counts. Multi-zone models expand to each declared zone; per-zone instance counts remain Unknown. Selection feeds the separate read-only live target availability inspector.
 
 - **Visualization:** table
 - **Scope:** `{Subscriptions}`
@@ -2018,7 +2028,7 @@ Select an exact V5/V6 target and export its subscription, current region and sou
 | extend ImageOffer = iff(IsVmss, tostring(properties.virtualMachineProfile.storageProfile.imageReference.offer), tostring(properties.storageProfile.imageReference.offer))
 | extend GuestOsName = tostring(properties.extended.instanceView.osName)
 | project ResourceId = id, Name = name, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags
+          Region = location, VmSize, Instances, OsType, OsDiskId, AvSetId, PowerState, ComputePriority, Zone, ImageSku, ImageId, ImagePublisher, ImageOffer, GuestOsName, IsVmss, Tags = tags, PlacementZones = zones
 | join kind=leftouter (
     resources
     | where type =~ 'microsoft.compute/disks'
@@ -2049,6 +2059,7 @@ Select an exact V5/V6 target and export its subscription, current region and sou
          PriceUpdate = tostring(P[13]),
          MpVcpu = tostring(P[14]),
          MpMemoryGB = tostring(P[15])
+| where Lifecycle != 'OPTIONAL'
 | extend RetiresOn = iff(isempty(RetirementDate), datetime(null), todatetime(RetirementDate))
 | extend DaysToRetirement = iff(isempty(RetirementDate), toint(-1), datetime_diff('day', todatetime(RetirementDate), now()))
 | extend RegionId = tostring(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(Region)])
@@ -2127,13 +2138,23 @@ Select an exact V5/V6 target and export its subscription, current region and sou
         iff(WarnCodes has 'z', 'Limited zone coverage, ', ''),
         iff(WarnCodes has 'v', 'No target at current vCPU count, ', '')))
 | extend SizeConsiderations = iff(isempty(SizeConsiderations), 'Straight resize', SizeConsiderations)
-| where Lifecycle != 'OPTIONAL'
 | extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',
          parse_json('{ ...lifecycle lookup, see note below... }')[VmSize], parse_json('{ ...lifecycle lookup, see note below... }')[VmSize]))
 | extend SelectedTargetSku = tostring(split(PathRecord, '|')[3]), SourceSubscriptionId = SubscriptionId,
-         SourceRegion = Region, SourceZone = Zone
-| project Name, VmSize, SelectedTargetSku, SourceRegion, SourceZone, SourceSubscriptionId, ResourceId
-| order by Name asc
+         SourceRegion = Region,
+         PlacementOptions = iff(isnull(PlacementZones) or array_length(PlacementZones) == 0,
+                                dynamic(['Regional']), PlacementZones)
+| mv-expand SourceZone = PlacementOptions limit 2000
+| extend SourceZone = tostring(SourceZone),
+         ZoneInstances = iff(array_length(PlacementZones) > 1, tolong(''), tolong(Instances))
+| summarize AffectedResources = count(), KnownInstances = sum(ZoneInstances),
+            MultiZoneModels = countif(array_length(PlacementZones) > 1),
+            UnknownInstanceResources = countif(isnull(ZoneInstances) or ZoneInstances < 0)
+    by SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku
+| extend AffectedInstances = iff(UnknownInstanceResources > 0, tolong(''), KnownInstances)
+| project SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku,
+          AffectedResources, AffectedInstances, MultiZoneModels, UnknownInstanceResources
+| order by SourceSubscriptionId asc, SourceRegion asc, SourceZone asc, SelectedTargetSku asc
 ```
 
 ## Assess - Required actions

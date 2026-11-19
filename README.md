@@ -77,7 +77,28 @@ only to its specific evidence; Unknown is not a pass. Empty grids and disappeari
 resources do not prove absence, successful migration or application readiness.
 The detailed report descriptions below retain their familiar names.
 
-### Workload discovery and live eligibility
+### Platform score, commercial signals and assessment layout
+
+Inventory includes an on-page score/penalty key and all four score bands:
+**85-100 Few**, **60-84 Moderate**, **35-59 Substantial**, **0-34 Major scored
+platform changes**. Only populated bands appear in the distribution. A high score
+means few captured platform penalties, not completed guest/application checks.
+Gen1, Server 2016 and ADE are not penalized merely for existing if the selected
+target does not require the affected conversion route.
+
+The adjacent commercial key distinguishes legacy-series pricing, RI
+purchase/renewal cutoffs and separate regional exposure. None reads customer
+reservation expiry, current billing or negotiated rates.
+
+Assess stacks independent **full-width V5 and V6 panels**. Each compact grid has
+eight visible columns; **ChecksNotMet** and **ChecksUnknown** count all 22 checks,
+not just the three directly displayed status columns. Select **All 22 checks** for
+the resource's vertically listed statuses and evidence in the native details view.
+Export retains every prerequisite as its own column. An on-page dictionary
+explains each prerequisite and the four states. Zero mismatches with unknown
+evidence is not approval.
+
+### Workload discovery and live target availability
 
 Compute associations use AKS node resource groups, Databricks/managed-application
 managed resource groups, resource-group `managedBy`, and AVD session-host VM links.
@@ -104,11 +125,24 @@ Observed guest OS takes precedence over image labels. Hints never mark boot,
 driver or traffic validation Met. Windows Server 2019 shared-disk NVMe compatibility
 requires separate review.
 
-In **Upgrade paths**, choose V5/V6 and select a source row to inspect the exact
-target's live subscription/current-region Compute SKU record. Full restriction
+In **Upgrade paths > Live target availability**, choose V5/V6 and select a distinct
+**subscription / region / zone / target SKU combination**, rather than a VM.
+Affected resource/instance counts show the shared scope. Regional means no zone
+was specified, not all-zone support. Multi-zone scale-set models contribute a row
+for each declared zone; their resource counts repeat and per-zone instance counts
+remain Unknown (blank), so these rows must not be summed as fleet capacity.
+Missing or invalid model capacity likewise keeps the entire combination's
+instance count Unknown, not zero.
+
+The read-only Compute SKU record exposes subscription-specific offerability,
+advertised regions/zones and full restrictions. The selection label is downstream
+of row exports so it follows the actual request. Full restriction
 objects preserve type, reason, location and zone scope. Missing data or API
 failure is Unknown, not a passed check or proof of unavailability. No SKU
 restriction does not mean sufficient quota, policy approval or allocation capacity.
+The record is evidence to interpret for the selected placement, not an automatic
+availability verdict: the selected region/zone must be advertised and must not
+have an applicable location/zone restriction.
 This inspector does not overwrite catalogue recommendations or prerequisite statuses.
 Per-resource quota prerequisites remain Unknown: the separate quota tab evaluates
 the default V5-first fleet model, not an arbitrary V6 path.
@@ -181,10 +215,10 @@ target specs sit side by side.
 
 ![Target mapping tab](docs/images/target-mapping.png)
 
-### Upgrade paths: V5 and V6 side by side
+### Upgrade paths: stacked V5 and V6 assessments
 
-Select **Upgrade paths** to compare the same retiring resources in two half-width
-panels. Each selects a target from that generation's captured catalogue; a missing
+Select **Upgrade paths** to compare the same retiring resources in two stacked,
+full-width panels. Each selects a target from that generation's captured catalogue; a missing
 match is **manual selection required**, never a silent fallback to another generation.
 
 - **V5:** a non-NVMe target preserving the source's required architecture, CPU,
@@ -214,8 +248,9 @@ Each prerequisite has its own **Met / Not met / Unknown / Not applicable**
 column: target selection, generation, conversion OS/encryption, NVMe boot, MANA,
 architecture, memory, local disk, catalogue region, zone, availability set,
 scale-set model, disk/NIC limits, quota, policy, allocation capacity, backup,
-ASR conversion, application validation and rollback. Scroll each grid horizontally
-or export it to inspect all columns. **Met** means only that the available evidence
+ASR conversion, application validation and rollback. These columns remain in the
+export; select **All 22 checks** for vertically listed per-resource details. The
+compact grid's mismatch/unknown counts include every check. **Met** means only that the available evidence
 satisfies that particular check; missing guest, placement, quota or application
 evidence stays **Unknown**. The paths' quota column is not automatically certified
 by the separate quota-planning assessment.
@@ -508,12 +543,16 @@ python scripts/validate_queries.py    # all 27 live ARG queries in the current C
 # python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace
 ```
 
-The guided-workflow release uses an explicitly limited **metadata/API validation**
-scope: 41 offline tests, all 27 live ARG queries, quota and pricing/SQL boundary
-fixtures, workload-discovery fixtures and exact live target-SKU records. Fresh
+The current release uses an explicitly limited **metadata/API validation**
+scope: 49 offline tests, all 27 live ARG queries, quota and pricing/SQL boundary
+fixtures, workload-discovery fixtures and exact live target-SKU records. Additional
+ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,
+nine placement cases on both paths and all 22 prerequisite summary counts.
+Only explicit ARG throttling is retried, at most twice with visible 30/60-second
+delays; authentication/query errors and exhausted retries still fail validation. Fresh
 SQL guest-runtime verification was not completed because the SQL lab VM's guest
 agent did not report readiness during the earlier lab startup. No lab VM is
-started for this workflow-only validation. Portal visual verification was
+started for this reporting-only validation. Portal visual verification was
 also not completed. SQL detection remains an assessment signal, not proof of a
 running SQL service or application migration readiness.
 

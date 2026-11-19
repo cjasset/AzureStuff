@@ -4,9 +4,11 @@ Use --offline without Azure; live checks require az login + resource-graph ext."
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 
 from build_workbook import LOOKUP_PARAMETERS, WORKBOOK_SIZE_LIMIT, expand_lookups, lookup_values
 
@@ -29,6 +31,19 @@ def azure_json(arguments):
     if result.returncode:
         raise RuntimeError(f"Azure CLI failed: {(result.stderr or result.stdout).strip()}")
     return json.loads(result.stdout)
+
+
+def run_graph_query(arguments):
+    for attempt in range(3):
+        result = subprocess.run(arguments, capture_output=True, text=True, shell=os.name == "nt")
+        throttled = re.search(r'"code"\s*:\s*"(RateLimiting|TooManyRequests)"',
+                              result.stderr or result.stdout)
+        if result.returncode == 0 or not throttled or attempt == 2:
+            return result
+        delay = 30 * (attempt + 1)
+        print(f"  WARN  ARG throttled the query; retrying in {delay}s "
+              f"(attempt {attempt + 2}/3)", flush=True)
+        time.sleep(delay)
 
 
 def walk(node, found):
@@ -210,10 +225,9 @@ def main():
             f.write(q)
             path = f.name
         try:
-            r = subprocess.run(
+            r = run_graph_query(
                 ["az", "graph", "query", "-q", f"@{path}", "--subscriptions", subscription,
-                 "--first", "5", "-o", "json"],
-                capture_output=True, text=True, shell=os.name == "nt")
+                 "--first", "5", "-o", "json"])
             if r.returncode == 0:
                 data = json.loads(r.stdout)
                 cols = list(data["data"][0].keys()) if data["data"] else []

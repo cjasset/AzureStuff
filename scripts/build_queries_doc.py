@@ -24,8 +24,10 @@ DESCRIPTIONS = {
                            "compute. Host-pool, SQL, SAP and managed resource-group metadata are evidence, not runtime proof."),
     "discovery-pools": ("Workload discovery", "Configured AKS/Batch pool sizes, autoscaler maxima, surge and "
                         "node targets; not running-node counts or automatic additions to the Compute quota plan."),
-    "eligibility-sources": ("Upgrade paths", "Select an exact V5/V6 target and export its subscription, current "
-                            "region and source zone to the separate read-only Compute SKU API inspector."),
+    "eligibility-sources": ("Upgrade paths", "One row per subscription/region/zone/exact V5 or V6 target SKU "
+                            "combination, with affected resource/instance counts. Multi-zone models expand "
+                            "to each declared zone; per-zone instance counts remain Unknown. Selection "
+                            "feeds the separate read-only live target availability inspector."),
     "quota-demand": ("Capacity / quota", "Optional source/target/delta breakdown by subscription, region "
                      "and captured target family, respecting the planning-scope dropdown."),
     "quota-check": ("Capacity / quota", "Automatic regional and family quota checks for every affected "
@@ -42,10 +44,10 @@ DESCRIPTIONS = {
     "ov-urgency": ("Overview", "Impacted instances grouped by urgency band."),
     "ov-gen": ("Overview", "Impacted resources by the actual Hyper-V generation "
                "read from each managed OS disk."),
-    "ov-complexity": ("Overview", "Resource and instance counts by migration "
-                      "complexity band, with average readiness."),
+    "ov-complexity": ("Overview", "Resource and instance counts by populated scored platform-change "
+                      "band, with average platform score; not workload complexity or approval."),
     "ov-commercial": ("Overview", "Series in scope for the 1 February 2027 pricing "
-                      "update and the Reserved Instance position for each."),
+                      "update and captured RI purchase/renewal cutoffs; customer coverage not inspected."),
     "ov-topsizes": ("Overview", "The 25 most-used affected sizes with their "
                     "recommended target and next retirement date."),
     "imp-grid": ("Impacted resources", "Every affected VM and scale set with region, "
@@ -57,10 +59,10 @@ DESCRIPTIONS = {
     "sql-modernization-grid": ("SQL modernization", "Retiring VMs with exact SQL IaaS extension identity "
                                "and/or SQL VM registration, deduplicated per VM, including Flexible members. "
                                "Edition/license/group registration are not runtime or HA-health proof."),
-    "path-v5-grid": ("Upgrade paths", "Left-hand V5 panel: independent v5 target, "
-                     "target-specific prerequisites, OS/encryption/image signals and explicit unknowns."),
-    "path-v6-grid": ("Upgrade paths", "Right-hand V6 panel: independent v6 target, "
-                     "conversion/NVMe prerequisites, OS/encryption/image signals and explicit unknowns."),
+    "path-v5-grid": ("Upgrade paths", "Full-width V5 panel: compact status/count summary and per-VM "
+                     "vertical details; all 22 prerequisite statuses and evidence retained in exports."),
+    "path-v6-grid": ("Upgrade paths", "Stacked full-width V6 panel: independent target, compact summary "
+                     "and per-VM vertical details; all 22 statuses and conversion/NVMe evidence retained."),
     "map-grid": ("Target mapping", "One row per affected size: current spec, "
                  "recommended target, memory-preserving alternative and retirement date."),
     "map-detail": ("Target mapping", "Alternate targets, size considerations, series "

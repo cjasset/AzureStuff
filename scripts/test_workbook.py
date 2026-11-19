@@ -1,10 +1,12 @@
 """Offline regression coverage for saved-workbook deployment."""
 import copy
 import json
+import subprocess
 import unittest
+from unittest.mock import patch
 
 import build_workbook as builder
-from validate_queries import structure_check, walk, walk_items
+from validate_queries import run_graph_query, structure_check, walk, walk_items
 
 
 def find_item(workbook, name):
@@ -16,6 +18,29 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def setUpClass(cls):
         cls.data = builder.load()
         cls.workbook = builder.build(cls.data)
+
+    def test_graph_validation_retries_throttling_and_preserves_exhausted_failure(self):
+        failure = subprocess.CompletedProcess([], 1, "", 'ERROR: {"code": "RateLimiting"}')
+        success = subprocess.CompletedProcess([], 0, '{"data":[]}', "")
+        with patch("validate_queries.subprocess.run", side_effect=[failure, success]) as run, \
+                patch("validate_queries.time.sleep") as sleep:
+            self.assertIs(run_graph_query(["az", "graph"]), success)
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(30)
+        with patch("validate_queries.subprocess.run", return_value=failure) as run, \
+                patch("validate_queries.time.sleep") as sleep:
+            self.assertIs(run_graph_query(["az", "graph"]), failure)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [30, 60])
+
+    def test_graph_validation_does_not_retry_authentication_or_query_errors(self):
+        for code in ("AuthenticationFailed", "InvalidQuery"):
+            failure = subprocess.CompletedProcess([], 1, "", json.dumps({"code": code}))
+            with patch("validate_queries.subprocess.run", return_value=failure) as run, \
+                    patch("validate_queries.time.sleep") as sleep:
+                self.assertIs(run_graph_query(["az", "graph"]), failure)
+                run.assert_called_once()
+                sleep.assert_not_called()
 
     def test_workflow_has_six_stages_and_starts_with_guidance(self):
         links = find_item(self.workbook, "tabs")["content"]["links"]
@@ -178,6 +203,10 @@ class WorkbookDeploymentTests(unittest.TestCase):
                 lookup = builder.build_lookups(self.data, path_generation=generation)
                 expected = builder.base_query(lookup[0], lookup[3], lookup[4], include_optional=False)
                 self.assertTrue(expanded.startswith(expected), name)
+            elif name == "eligibility-sources":
+                expected = builder.base_query(sku_map, regions, region_ids,
+                                              include_optional=False, include_placement_zones=True)
+                self.assertTrue(expanded.startswith(expected), name)
             else:
                 self.assertTrue(expanded.startswith(original), name)
             for parameter in builder.LOOKUP_PARAMETERS:
@@ -235,12 +264,12 @@ class WorkbookDeploymentTests(unittest.TestCase):
         group = find_item(self.workbook, "grp-sql")
         self.assertEqual(group["conditionalVisibility"]["value"], "sql")
 
-    def test_upgrade_paths_are_two_half_width_panels_in_one_tab(self):
+    def test_upgrade_paths_are_two_stacked_full_width_panels_in_one_tab(self):
         group = find_item(self.workbook, "grp-paths")
         self.assertEqual(group["conditionalVisibility"]["value"], "paths")
         panels = [i for i in group["content"]["items"] if i["type"] == 12]
         self.assertEqual([p["name"] for p in panels], ["path-v5-panel", "path-v6-panel"])
-        self.assertEqual([p["customWidth"] for p in panels], ["50", "50"])
+        self.assertEqual([p["customWidth"] for p in panels], ["100", "100"])
         for panel in panels:
             self.assertEqual(len(panel["content"]["items"]), 3)
             query = panel["content"]["items"][1]["content"]["query"]
@@ -250,6 +279,66 @@ class WorkbookDeploymentTests(unittest.TestCase):
             self.assertIn("Manual selection required", query)
             self.assertIn("Custom/gallery image - verify guest drivers", query)
             self.assertNotIn("| project ReadinessScore", query)
+
+    def test_inventory_explains_every_platform_score_band_and_penalty(self):
+        key = find_item(self.workbook, "ov-score-key")["content"]["json"]
+        for text in ("85-100", "60-84", "35-59", "0-34", "populated bands only",
+                     "Few scored platform changes", "Moderate scored platform changes",
+                     "Substantial scored platform changes", "Major scored platform changes",
+                     "100 is not migration approval", "MANA validation deducts 0"):
+            self.assertIn(text, key)
+        for value in set(builder.PENALTY.values()):
+            self.assertIn(str(value), key)
+
+    def test_inventory_commercial_key_separates_signals_from_customer_billing(self):
+        key = find_item(self.workbook, "ov-commercial-key")["content"]["json"]
+        for text in ("1 February 2027", "1 July 2026", "Passed", "Upcoming",
+                     "No cutoff in captured catalogue", "Coverage not assessed",
+                     "does not read your reservations", "Regional price exposure"):
+            self.assertIn(text, key)
+
+    def test_compact_assessment_keeps_all_checks_in_details_and_export(self):
+        self.assertEqual(len(builder.ASSESSMENT_CHECKS), 22)
+        key = find_item(self.workbook, "assessment-column-key")["content"]["json"]
+        for column in builder.ASSESSMENT_CHECKS:
+            self.assertIn(f"| {column} |", key)
+        for generation in (5, 6):
+            grid = find_item(self.workbook, f"path-v{generation}-grid")["content"]
+            formatters = {f["columnMatch"]: f for f in grid["gridSettings"]["formatters"]}
+            visible = {name for name, f in formatters.items() if f["formatter"] != 5}
+            self.assertEqual(visible, {"Resource", "Target", "GenerationSupport", "NvmeBoot",
+                                       "ManaNetworking", "ChecksNotMet", "ChecksUnknown", "Review"})
+            self.assertEqual(formatters["Review"]["formatOptions"]["linkTarget"], "GenericDetails")
+            self.assertEqual(grid["exportToExcelOptions"], "all")
+
+    def test_assessment_counts_include_every_check_not_just_visible_columns(self):
+        for generation in (5, 6):
+            query = find_item(self.workbook, f"path-v{generation}-grid")["content"]["query"]
+            for name in builder.ASSESSMENT_CHECKS:
+                self.assertIn(f"iff({name} == 'Not met', 1, 0)", query)
+                self.assertIn(f"iff({name} == 'Unknown', 1, 0)", query)
+
+    def test_live_availability_groups_all_placement_dimensions_without_guessing_zone_counts(self):
+        source = find_item(self.workbook, "eligibility-sources")["content"]["query"]
+        self.assertIn("PlacementZones = zones", source)
+        self.assertIn("by SourceSubscriptionId, SourceRegion, SourceZone, SelectedTargetSku", source)
+        self.assertIn("mv-expand SourceZone = PlacementOptions limit 2000", source)
+        self.assertIn("dynamic(['Regional'])", source)
+        self.assertIn("iff(UnknownInstanceResources > 0, tolong(''), KnownInstances)", source)
+        self.assertIn("countif(isnull(ZoneInstances) or ZoneInstances < 0)", source)
+        self.assertNotIn("| project Name, VmSize, SelectedTargetSku", source)
+        self.assertNotIn("{LifecycleFilter}", source)
+
+    def test_live_selection_explanation_is_downstream_of_row_exports(self):
+        items = find_item(self.workbook, "grp-paths")["content"]["items"]
+        names = [item["name"] for item in items]
+        self.assertLess(names.index("eligibility-sources"), names.index("eligibility-selection"))
+        self.assertLess(names.index("eligibility-selection"), names.index("eligibility-live"))
+        intro = find_item(self.workbook, "eligibility-intro")["content"]["json"]
+        self.assertNotIn("{LiveTarget}", intro)
+        self.assertIn("Live target availability", intro)
+        self.assertIn("not an automatic all-clear", intro)
+        self.assertIn("not deployment approval", intro)
 
     def test_platform_score_is_not_migration_approval(self):
         queries = []
