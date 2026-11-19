@@ -57,6 +57,10 @@ actions, interpretation, checkpoint and next step. Report selections are
 independent, so returning to a stage retains its current report during the session.
 The workflow uses a new navigation parameter, rather than reusing legacy
 `SelectedTab` report values that could otherwise hide every stage after an upgrade.
+`WorkflowStage` is declared **global** so footer Next, Previous, Recheck and Help
+actions update the stage visibility and top tabs above them. Report selectors
+remain local. A non-global parameter only propagates downstream in Workbooks and
+cannot support these footer actions.
 
 | Stage | Reports and outcome |
 | --- | --- |

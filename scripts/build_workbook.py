@@ -1609,6 +1609,7 @@ def build(data):
                     "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"workflow:{name}")),
                     "version": "KqlParameterItem/1.0", "name": name, "type": 1,
                     "isRequired": True, "isHiddenWhenLocked": True, "value": value,
+                    "isGlobal": name == "WorkflowStage",
                 }
                 for name, value in [("WorkflowStage", "start")] + [
                     (parameter, options[0][1])

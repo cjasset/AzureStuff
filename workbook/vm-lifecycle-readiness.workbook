@@ -24,7 +24,8 @@
             "type": 1,
             "isRequired": true,
             "isHiddenWhenLocked": true,
-            "value": "start"
+            "value": "start",
+            "isGlobal": true
           },
           {
             "id": "6a190b82-b32c-5f9a-880c-03f35f1c42fd",
@@ -33,7 +34,8 @@
             "type": 1,
             "isRequired": true,
             "isHiddenWhenLocked": true,
-            "value": "overview"
+            "value": "overview",
+            "isGlobal": false
           },
           {
             "id": "e2e93131-04f9-519a-897a-3a3fda72d02b",
@@ -42,7 +44,8 @@
             "type": 1,
             "isRequired": true,
             "isHiddenWhenLocked": true,
-            "value": "paths"
+            "value": "paths",
+            "isGlobal": false
           },
           {
             "id": "d22002af-09a7-53d9-b5ec-9313b86e7cbd",
@@ -51,7 +54,8 @@
             "type": 1,
             "isRequired": true,
             "isHiddenWhenLocked": true,
-            "value": "quota"
+            "value": "quota",
+            "isGlobal": false
           },
           {
             "id": "b0a1f2c3-1111-4a11-9c01-000000000001",

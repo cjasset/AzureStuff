@@ -95,6 +95,8 @@ def structure_check(wb):
     for parameter in navigation_parameters:
         if parameter not in declared or (parameter, declared[parameter].get("value")) not in destinations:
             problems.append(f"navigation parameter {parameter} has no valid default")
+    if not declared.get("WorkflowStage", {}).get("isGlobal"):
+        problems.append("WorkflowStage must be global for footer navigation")
     for required in ("Subscriptions", "LifecycleFilter"):
         if required not in params:
             problems.append(f"missing parameter {required}")

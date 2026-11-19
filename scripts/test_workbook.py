@@ -28,6 +28,8 @@ class WorkbookDeploymentTests(unittest.TestCase):
                          [link["subTarget"] for link in links])
         parameters = find_item(self.workbook, "parameters")["content"]["parameters"]
         self.assertEqual(next(p["value"] for p in parameters if p["name"] == "WorkflowStage"), "start")
+        self.assertTrue(next(p["isGlobal"] for p in parameters if p["name"] == "WorkflowStage"),
+                        "Footer controls must update the stage visibility and tab selector above them.")
         self.assertNotIn("SelectedTab", {p["name"] for p in parameters},
                          "Legacy report-tab state must not select a nonexistent workflow stage.")
 
@@ -45,6 +47,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
             self.assertTrue(all(item["conditionalVisibility"]["parameterName"] == parameter for item in reports))
             self.assertEqual(parameters[parameter]["value"], keys[0])
             self.assertTrue(parameters[parameter]["isHiddenWhenLocked"])
+            self.assertFalse(parameters[parameter].get("isGlobal", False))
             links = find_item(self.workbook, f"workflow-views-{stage}")["content"]["links"]
             self.assertEqual([link["subTarget"] for link in links], keys)
             self.assertTrue(all(link["cellValue"] == parameter for link in links))
@@ -93,6 +96,10 @@ class WorkbookDeploymentTests(unittest.TestCase):
         workbook = copy.deepcopy(self.workbook)
         find_item(workbook, "stage-inventory")["conditionalVisibility"]["parameterName"] = "InventoryView"
         self.assertIn("top-level group stage-inventory must be a workflow stage", structure_check(workbook))
+        workbook = copy.deepcopy(self.workbook)
+        parameters = find_item(workbook, "parameters")["content"]["parameters"]
+        next(p for p in parameters if p["name"] == "WorkflowStage")["isGlobal"] = False
+        self.assertIn("WorkflowStage must be global for footer navigation", structure_check(workbook))
 
     def test_workflow_item_names_and_link_ids_are_unique(self):
         items = list(walk_items(self.workbook["items"]))
