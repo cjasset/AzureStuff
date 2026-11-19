@@ -184,10 +184,12 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 27)
+        self.assertEqual(len(queries), 28)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
-            if name == "about-allsizes":
+            if name == "eligibility-status":
+                self.assertEqual(query, builder.live_access_query())
+            elif name == "about-allsizes":
                 self.assertEqual(expanded, builder.expand_lookups(builder.coverage_query(), self.workbook))
             elif name.startswith("discovery-"):
                 self.assertNotIn("| where isnotempty(Rec)", expanded)
@@ -267,7 +269,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def test_upgrade_paths_are_two_stacked_full_width_panels_in_one_tab(self):
         group = find_item(self.workbook, "grp-paths")
         self.assertEqual(group["conditionalVisibility"]["value"], "paths")
-        panels = [i for i in group["content"]["items"] if i["type"] == 12]
+        panels = [i for i in group["content"]["items"] if i["name"].startswith("path-v")]
         self.assertEqual([p["name"] for p in panels], ["path-v5-panel", "path-v6-panel"])
         self.assertEqual([p["customWidth"] for p in panels], ["100", "100"])
         for panel in panels:
@@ -333,12 +335,12 @@ class WorkbookDeploymentTests(unittest.TestCase):
         items = find_item(self.workbook, "grp-paths")["content"]["items"]
         names = [item["name"] for item in items]
         self.assertLess(names.index("eligibility-sources"), names.index("eligibility-selection"))
-        self.assertLess(names.index("eligibility-selection"), names.index("eligibility-live"))
+        self.assertLess(names.index("eligibility-selection"), names.index("eligibility-result"))
         intro = find_item(self.workbook, "eligibility-intro")["content"]["json"]
         self.assertNotIn("{LiveTarget}", intro)
         self.assertIn("Live target availability", intro)
-        self.assertIn("not an automatic all-clear", intro)
-        self.assertIn("not deployment approval", intro)
+        self.assertIn("**Green is SKU access only**", intro)
+        self.assertIn("not a quota, Azure Policy, physical-capacity or migration", intro)
 
     def test_platform_score_is_not_migration_approval(self):
         queries = []
@@ -394,17 +396,67 @@ class WorkbookDeploymentTests(unittest.TestCase):
 
     def test_live_eligibility_is_exact_target_read_only_and_unknown_without_data(self):
         group = find_item(self.workbook, "grp-paths")
-        live = next(i for i in group["content"]["items"] if i["name"] == "eligibility-live")
+        live = find_item(self.workbook, "eligibility-live")
         source = next(i for i in group["content"]["items"] if i["name"] == "eligibility-sources")
         request = json.loads(live["content"]["query"])
         self.assertEqual(request["method"], "GETARRAY")
         self.assertIn("@.name=='{LiveTarget}'", request["transformers"][0]["settings"]["tablePath"])
         self.assertIn("$.restrictions", [c["path"] for c in request["transformers"][0]["settings"]["columns"]])
         self.assertTrue(live["content"]["noDataMessage"].startswith("Unknown:"))
-        self.assertEqual(live["conditionalVisibility"]["parameterName"], "LiveTarget")
+        self.assertEqual(live["conditionalVisibility"]["parameterName"], "LiveEvidence")
+        result = find_item(self.workbook, "eligibility-result")
+        self.assertEqual(result["conditionalVisibility"]["parameterName"], "LiveTarget")
         self.assertEqual(len(source["content"]["exportedParameters"]), 4)
         self.assertIn("{V5PathSkuMap}", source["content"]["query"])
         self.assertIn("{V6PathSkuMap}", source["content"]["query"])
+
+    def test_access_summary_reuses_one_live_lookup_without_a_second_customer_click(self):
+        parameters = find_item(self.workbook, "eligibility-record-parameter")["content"]["parameters"]
+        record = parameters[0]
+        self.assertEqual(record["name"], "LiveSkuRecord")
+        self.assertEqual(record["queryType"], 7)
+        self.assertTrue(record["isHiddenWhenLocked"])
+        merge = json.loads(record["query"])
+        self.assertEqual(merge["merges"][0]["leftTable"], "eligibility-live")
+        self.assertEqual(merge["projectRename"][0]["originalName"], "[eligibility-live].SkuRecord")
+        result = find_item(self.workbook, "eligibility-result")["content"]["items"]
+        self.assertEqual([item["name"] for item in result],
+                         ["eligibility-live", "eligibility-record-parameter", "eligibility-status"])
+        arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
+        self.assertEqual(len(arms), 1)
+
+    def test_access_summary_has_red_green_unknown_and_raw_is_opt_in(self):
+        content = find_item(self.workbook, "eligibility-status")["content"]
+        formatter = next(f for f in content["gridSettings"]["formatters"] if f["columnMatch"] == "AccessStatus")
+        rules = formatter["formatOptions"]["thresholdsGrid"]
+        self.assertEqual({rule["thresholdValue"]: rule["representation"] for rule in rules if "thresholdValue" in rule},
+                         {"Restricted": "red", "Not restricted": "green", "Unknown": "orange"})
+        self.assertTrue(content["noDataMessage"].startswith("Unknown:"))
+        controls = find_item(self.workbook, "eligibility-parameters")["content"]["parameters"]
+        self.assertEqual(next(p["value"] for p in controls if p["name"] == "LiveEvidence"), "summary")
+        self.assertEqual(find_item(self.workbook, "eligibility-live")["conditionalVisibility"]["value"], "raw")
+
+    def test_access_classifier_preserves_placement_scope_unknowns_and_quota_actions(self):
+        query = builder.live_access_query()
+        for expression in ("RestrictionType =~ 'Location'", "RestrictionType =~ 'Zone' and not(RegionalPlacement)",
+                           "ConflictingLocations", "not(RestrictionsKnown)", "UncertainRestrictions > 0",
+                           "not(RegionAdvertised)", "AdvertisedZoneEntries == 0", "QuotaBlocks > 0",
+                           "{LiveSkuRecord:json}", "Open a region/zone access support request",
+                           "No access ticket indicated"):
+            self.assertIn(expression, query)
+
+    def test_access_validator_rejects_missing_raw_payload_or_lookup_binding(self):
+        workbook = copy.deepcopy(self.workbook)
+        parameter = find_item(workbook, "eligibility-record-parameter")["content"]["parameters"][0]
+        parameter["query"] = "{}"
+        self.assertTrue(any("native Merge parameter" in error for error in structure_check(workbook)))
+        workbook = copy.deepcopy(self.workbook)
+        raw = find_item(workbook, "eligibility-live")["content"]
+        request = json.loads(raw["query"])
+        columns = request["transformers"][0]["settings"]["columns"]
+        columns[:] = [column for column in columns if column["columnid"] != "SkuRecord"]
+        raw["query"] = json.dumps(request)
+        self.assertTrue(any("complete unmodified SkuRecord" in error for error in structure_check(workbook)))
 
     def test_prerequisite_statuses_preserve_explicit_unknowns(self):
         queries = []

@@ -28,6 +28,10 @@ DESCRIPTIONS = {
                             "combination, with affected resource/instance counts. Multi-zone models expand "
                             "to each declared zone; per-zone instance counts remain Unknown. Selection "
                             "feeds the separate read-only live target availability inspector."),
+    "eligibility-status": ("Upgrade paths", "Customer-facing red/green/Unknown SKU access decision from "
+                           "the selected live ARM record. Applies location/zone restriction scope, "
+                           "validates advertised placement, preserves missing/ambiguous evidence as Unknown "
+                           "and distinguishes quota requests from region/zone access tickets."),
     "quota-demand": ("Capacity / quota", "Optional source/target/delta breakdown by subscription, region "
                      "and captured target family, respecting the planning-scope dropdown."),
     "quota-check": ("Capacity / quota", "Automatic regional and family quota checks for every affected "
@@ -131,7 +135,7 @@ def main():
     elided = {name: elide(expand_lookups(c["query"], wb)) for name, c in queries}
     # about-allsizes is a standalone coverage query, not part of the fleet
     # pipeline, so it would collapse the shared prefix to nothing.
-    independent = {"about-allsizes", "regional-price-grid"}
+    independent = {"about-allsizes", "regional-price-grid", "eligibility-status"}
     fleet = [q for n, q in elided.items()
              if n not in independent and not n.startswith("discovery-")]
     prefix = common_prefix(fleet)
@@ -163,8 +167,11 @@ def main():
         "`/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus`, API version "
         "`2021-07-01`, filtered to `{LiveRegion}`. Its JSONPath selects the exact "
         "`{LiveTarget}` and preserves full restrictions, location/zone information and capabilities. "
-        "The target is exported from a selected source row; a missing record is Unknown. "
-        "No restriction is interpreted as quota, policy or allocation approval.",
+        "The target is exported from a selected placement combination. A hidden native Merge "
+        "parameter reuses that record without another API request or customer click. The "
+        "`eligibility-status` ARG query evaluates the record and renders red Restricted, green "
+        "Not restricted or amber Unknown. Raw evidence is opt-in. A green access result is "
+        "not quota, policy or physical allocation approval.",
         "",
         "Quota checks use indexed Compute `QuotaResources` rather than per-row ARM "
         "lookups. This enables automatic cross-subscription checks but is eventually "

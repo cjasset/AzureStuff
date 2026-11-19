@@ -1551,6 +1551,88 @@ def coverage_query():
 | order by CatalogueCoverage asc, Instances desc"""
 
 
+def live_access_query():
+    return """resources
+| take 1
+| project SkuJson = tostring(dynamic({LiveSkuRecord:json})),
+          CheckedSubscription = '{LiveSubscription}', CheckedRegion = tolower('{LiveRegion}'),
+          CheckedZone = '{LiveZone}', CheckedTarget = '{LiveTarget}'
+| extend Sku = parse_json(SkuJson)
+| extend LocationRows = iff(array_length(Sku.locationInfo) > 0, Sku.locationInfo, dynamic([{}]))
+| mv-expand LocationRow = LocationRows limit 2000
+| summarize AdvertisedZoneEntries = countif(
+        tostring(LocationRow.location) =~ CheckedRegion and
+        array_index_of(LocationRow.zones, CheckedZone) >= 0)
+    by SkuJson, CheckedSubscription, CheckedRegion, CheckedZone, CheckedTarget
+| extend Sku = parse_json(SkuJson), RegionalPlacement = CheckedZone =~ 'Regional'
+| extend RecordMatches = tostring(Sku.name) =~ CheckedTarget and isnotempty(CheckedTarget)
+                            and tostring(Sku.resourceType) =~ 'virtualMachines'
+                            and isnotempty(CheckedSubscription) and isnotempty(CheckedRegion)
+                            and isnotempty(CheckedZone),
+         RegionAdvertised = coalesce(array_index_of(parse_json(tolower(tostring(Sku.locations))), CheckedRegion) >= 0, false),
+         RestrictionsKnown = isnotnull(array_length(Sku.restrictions)) and array_length(Sku.restrictions) <= 2000,
+         HasRestrictions = coalesce(array_length(Sku.restrictions) > 0, false)
+| extend RestrictionRows = iff(HasRestrictions, Sku.restrictions, dynamic([{}]))
+| mv-expand Restriction = RestrictionRows limit 2000
+| extend RestrictionType = tostring(Restriction.type),
+         InfoLocations = parse_json(tolower(tostring(Restriction.restrictionInfo.locations))),
+         ValueLocations = parse_json(tolower(tostring(Restriction['values'])))
+| extend ScopeLocations = iff(array_length(InfoLocations) > 0, InfoLocations,
+                              iff(RestrictionType =~ 'Location', ValueLocations, dynamic(null)))
+| extend ScopeKnown = coalesce(array_length(ScopeLocations) > 0, false),
+         ScopeMatches = coalesce(array_index_of(ScopeLocations, CheckedRegion) >= 0, false),
+         MalformedLocationScope = RestrictionType =~ 'Location' and (
+             (isnotempty(tostring(Restriction.restrictionInfo.locations)) and isnull(array_length(InfoLocations))) or
+             (isnotempty(tostring(Restriction['values'])) and isnull(array_length(ValueLocations)))),
+         ConflictingLocations = coalesce(RestrictionType =~ 'Location' and array_length(InfoLocations) > 0
+             and array_length(ValueLocations) > 0
+             and ((array_index_of(InfoLocations, CheckedRegion) >= 0) !=
+                  (array_index_of(ValueLocations, CheckedRegion) >= 0)), false),
+         ZonesKnown = coalesce(array_length(Restriction.restrictionInfo.zones) > 0, false),
+         ZoneMatches = coalesce(array_index_of(Restriction.restrictionInfo.zones, CheckedZone) >= 0, false)
+| extend RegionBlocked = HasRestrictions and RestrictionType =~ 'Location'
+                            and ScopeKnown and ScopeMatches and not(ConflictingLocations) and not(MalformedLocationScope),
+         ZoneBlocked = HasRestrictions and RestrictionType =~ 'Zone' and not(RegionalPlacement)
+                            and ScopeKnown and ScopeMatches and ZonesKnown and ZoneMatches,
+         UncertainRestriction = HasRestrictions and (
+             RestrictionType !in~ ('Location', 'Zone') or
+             (RestrictionType =~ 'Location' and (not(ScopeKnown) or ConflictingLocations or MalformedLocationScope)) or
+             (RestrictionType =~ 'Zone' and not(RegionalPlacement) and
+                 (not(ScopeKnown) or (ScopeMatches and not(ZonesKnown)))))
+| summarize RegionalBlocks = countif(RegionBlocked), ZonalBlocks = countif(ZoneBlocked),
+            UncertainRestrictions = countif(UncertainRestriction),
+            QuotaBlocks = countif((RegionBlocked or ZoneBlocked) and tostring(Restriction.reasonCode) =~ 'QuotaId')
+    by CheckedSubscription, CheckedRegion, CheckedZone, CheckedTarget,
+       RecordMatches, RegionAdvertised, RestrictionsKnown, AdvertisedZoneEntries, RegionalPlacement
+| extend AccessStatus = case(
+        not(RecordMatches), 'Unknown',
+        RegionalBlocks > 0 or ZonalBlocks > 0, 'Restricted',
+        not(RestrictionsKnown) or UncertainRestrictions > 0 or not(RegionAdvertised)
+            or (not(RegionalPlacement) and AdvertisedZoneEntries == 0), 'Unknown',
+        'Not restricted')
+| extend Reason = case(
+        not(RecordMatches), 'The current SKU check did not return a matching record. No access decision is available.',
+        RegionalBlocks > 0, 'This subscription has an access restriction for the selected SKU in this region.',
+        ZonalBlocks > 0, 'This subscription has an access restriction for the selected SKU in this zone.',
+        not(RestrictionsKnown) or UncertainRestrictions > 0, 'Restriction information is missing or cannot be safely interpreted.',
+        not(RegionAdvertised), 'The selected region is not advertised by this SKU record; access cannot be confirmed.',
+        not(RegionalPlacement) and AdvertisedZoneEntries == 0, 'The selected zone is not advertised by this SKU record; access cannot be confirmed.',
+        'No applicable region or zone access restriction was returned.')
+| extend NextStep = case(
+        AccessStatus == 'Restricted' and QuotaBlocks > 0, 'Request a quota increase for this SKU/family and region; see Capacity & quota.',
+        AccessStatus == 'Restricted', 'Open a region/zone access support request for this subscription, target SKU and placement.',
+        AccessStatus == 'Not restricted', 'No access ticket indicated. Continue with quota, policy and migration checks.',
+        'Retry the check and verify permissions/placement. If unresolved, contact Azure support; do not treat this as clear.'),
+         Help = iff(AccessStatus == 'Restricted', 'Open support request',
+                    iff(AccessStatus == 'Unknown', 'Troubleshooting', '')),
+         HelpUrl = case(AccessStatus == 'Restricted',
+             'https://portal.azure.com/#view/Microsoft_Azure_Support/HelpAndSupportBlade/~/overview',
+             AccessStatus == 'Unknown', 'https://learn.microsoft.com/azure/azure-resource-manager/troubleshooting/error-sku-not-available',
+             '')
+| project AccessStatus, Reason, NextStep, Help, HelpUrl,
+          CheckedSubscription, CheckedRegion, CheckedZone, CheckedTarget"""
+
+
 def eligibility_items(base):
     source = arg_query(base + """
 | extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',
@@ -1595,9 +1677,47 @@ def eligibility_items(base):
             "tablePath": "$[?(@.resourceType=='virtualMachines' && @.name=='{LiveTarget}')]",
             "columns": [
                 {"path": path, "columnid": column} for column, path in (
-                    ("Target", "$.name"), ("Family", "$.family"), ("Locations", "$.locations"),
+                    ("SkuRecord", "$"), ("Target", "$.name"), ("Family", "$.family"), ("Locations", "$.locations"),
                     ("LocationAndZones", "$.locationInfo"), ("Restrictions", "$.restrictions"),
                     ("Capabilities", "$.capabilities"))]}}],
+    }
+    merge_id = "e0dc6ed2-412d-49ca-8259-335a03ce4188"
+    record_parameter = {
+        "version": "KqlParameterItem/1.0", "name": "LiveSkuRecord", "type": 1,
+        "isHiddenWhenLocked": True, "value": "", "queryType": 7,
+        "query": json.dumps({
+            "version": "Merge/1.0",
+            "merges": [{"id": merge_id, "mergeType": "table", "leftTable": "eligibility-live"}],
+            "projectRename": [{"originalName": "[eligibility-live].SkuRecord",
+                               "mergedName": "SkuRecord", "fromId": merge_id}],
+        }),
+    }
+    summary = arg_query(
+        live_access_query(), "eligibility-status", size=1, export=True,
+        title="Does this subscription need SKU region/zone access?",
+        grid=grid_settings(
+            {"AccessStatus": "15%", "Reason": "30%", "NextStep": "40%", "Help": "15%"},
+            [fmt("AccessStatus", 18, formatOptions={"thresholdsOptions": "colors",
+                 "thresholdsGrid": [
+                     {"operator": "==", "thresholdValue": status, "representation": color,
+                      "text": "{0}{1}"}
+                     for status, color in (("Restricted", "red"), ("Not restricted", "green"),
+                                           ("Unknown", "orange"))]
+                 + [{"operator": "Default", "representation": "orange", "text": "Unknown"}]}),
+             fmt("Help", 1, formatOptions={"linkTarget": "Url", "linkColumn": "HelpUrl"})]
+            + [fmt(name, 5) for name in ("HelpUrl", "CheckedSubscription", "CheckedRegion",
+                                        "CheckedZone", "CheckedTarget")],
+            labelSettings=[{"columnId": "AccessStatus", "label": "SKU access"}]),
+        extra={"noDataMessage": "Unknown: the live access check did not return a result. Retry and check permissions; this is not a green result."})
+    raw = {
+        "type": 3, "name": "eligibility-live", "conditionalVisibility": {
+            "parameterName": "LiveEvidence", "comparison": "isEqualTo", "value": "raw"},
+        "content": {"version": "KqlItem/1.0", "queryType": 12, "query": json.dumps(arm),
+                    "title": "Advanced: raw Compute SKU evidence",
+                    "size": 1, "visualization": "table", "showExportToExcel": True,
+                    "noDataMessage": "Unknown: no matching target SKU returned. Check selection, API permissions and region.",
+                    "gridSettings": grid_settings(
+                        {"Target": "24ch", "Restrictions": "80ch"}, [fmt("SkuRecord", 5)], filter=True)},
     }
     return [
         text_item(
@@ -1609,46 +1729,51 @@ def eligibility_items(base):
             "attempt an allocation or promise physical capacity. "
             "A missing target or failed API request is **Unknown**, "
             "not an unsupported SKU or a passed check. No row means no eligibility evidence.\n\n"
-            "Inspect each restriction's **type, reasonCode, restrictionInfo.locations and zones** "
-            "against the selected placement. A zonal restriction is not automatically a regional "
-            "block. An empty restriction list means no SKU restriction was returned, not quota, "
-            "policy, cluster-resize compatibility or physical allocation approval. Compare current "
-            "capabilities with NIC/data-disk counts in Workload discovery. Clear/reselect a combination "
-            "after changing the path; the details below always name the selected target.\n\n"
+            "**Green - Not restricted:** no applicable SKU region/zone access restriction was returned. "
+            "No access ticket is indicated; continue with quota, policy and migration checks.\n\n"
+            "**Red - Restricted:** access is restricted for this subscription and selected placement. "
+            "Use **Open support request** to request region/zone access, including the subscription, "
+            "target SKU, region and zone shown below. A quota-coded restriction instead needs a quota increase.\n\n"
+            "**Amber - Unknown:** the check failed, evidence is incomplete, or the placement is not "
+            "advertised. Retry/verify permissions and placement; never treat Unknown as green. "
+            "A restriction for another zone or region does not make this placement red. "
+            "Choose **Advanced raw evidence** only when troubleshooting; customers do not need to "
+            "interpret JSON. Clear/reselect a combination after changing the path.\n\n"
             "**Placement key:** Regional means no zone was specified; it does not mean every zone "
             "is supported. A multi-zone scale-set model contributes a combination for each declared "
             "zone; its resources repeat across those rows and its per-zone instance count stays "
             "Unknown (blank). Missing/invalid model capacity also keeps the combination's instance "
             "count Unknown, never zero. Do not sum those rows as fleet capacity. "
             "Missing targets need manual selection.\n\n"
-            "**Result key:** A returned SKU must advertise the selected region and, for zonal placement, "
-            "the selected zone. A matching location or zone restriction means restricted for that "
-            "placement. Advertised placement with no applicable restriction means no SKU restriction "
-            "returned, **not deployment approval**. The raw record below preserves the evidence; "
-            "it is not an automatic all-clear. This inspector does not change the captured catalogue, "
+            "**Green is SKU access only**, not a quota, Azure Policy, physical-capacity or migration "
+            "approval. This inspector does not change the captured catalogue, "
             "recommendations or prerequisite statuses.",
             "eligibility-intro"),
         {"type": 9, "name": "eligibility-parameters", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [{
                 "version": "KqlParameterItem/1.0", "name": "EligibilityGeneration", "type": 2,
                 "label": "Inspect upgrade path", "isRequired": True, "value": "5",
-                "jsonData": json.dumps([{"value": str(g), "label": f"V{g}"} for g in (5, 6)])}]
+                "jsonData": json.dumps([{"value": str(g), "label": f"V{g}"} for g in (5, 6)])},
+                {"version": "KqlParameterItem/1.0", "name": "LiveEvidence", "type": 2,
+                 "label": "Result detail", "isRequired": True, "value": "summary",
+                 "jsonData": json.dumps([{"value": "summary", "label": "Customer summary"},
+                                         {"value": "raw", "label": "Advanced raw evidence"}])}]
             + [{"version": "KqlParameterItem/1.0", "name": name, "type": 1,
                 "value": "", "isHiddenWhenLocked": True}
                for name in ("LiveSubscription", "LiveRegion", "LiveTarget", "LiveZone")]}},
         source,
         text_item(
             "Current selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, "
-            "region **{LiveRegion}**, zone / regional **{LiveZone}**. Compare this placement with "
-            "**LocationAndZones** and the full **Restrictions** below.",
+            "region **{LiveRegion}**, zone / regional **{LiveZone}**.",
             "eligibility-selection"),
-        {"type": 3, "name": "eligibility-live", "conditionalVisibility": {
+        {"type": 12, "name": "eligibility-result", "conditionalVisibility": {
             "parameterName": "LiveTarget", "comparison": "isNotEqualTo", "value": ""},
-         "content": {"version": "KqlItem/1.0", "queryType": 12, "query": json.dumps(arm),
-                     "title": "Live target availability evidence - advertised zones and placement restrictions",
-                     "size": 1, "visualization": "table", "showExportToExcel": True,
-                     "noDataMessage": "Unknown: no matching target SKU returned. Check selection, API permissions and region.",
-                     "gridSettings": grid_settings({"Target": "24ch", "Restrictions": "80ch"}, filter=True)}},
+         "content": {"version": "NotebookGroup/1.0", "groupType": "editable", "items": [
+             raw,
+             {"type": 9, "name": "eligibility-record-parameter", "content": {
+                 "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [record_parameter]}},
+             summary,
+         ]}},
     ]
 
 

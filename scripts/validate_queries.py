@@ -23,6 +23,11 @@ SUBSTITUTIONS = {
     "{QuotaMigrationMode}": "sidebyside",
     "{DiscoveryWorkload}": "All",
     "{EligibilityGeneration}": "5",
+    "{LiveSkuRecord:json}": "{}",
+    "{LiveSubscription}": "",
+    "{LiveRegion}": "",
+    "{LiveZone}": "",
+    "{LiveTarget}": "",
 }
 
 def azure_json(arguments):
@@ -128,7 +133,7 @@ def structure_check(wb):
     known = set(params)
     import re
     for name, q in found:
-        for ref in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", q):
+        for ref in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::[^{}]+)?\}", q):
             if ref not in known:
                 problems.append(f"{name}: references unknown parameter {{{ref}}}")
         # A declared parameter used WITHOUT braces is never substituted by the
@@ -163,6 +168,18 @@ def structure_check(wb):
             for value in node:
                 check_scope(value)
     check_scope(wb)
+    if any(item.get("name") == "eligibility-status" for item in all_items):
+        record = declared.get("LiveSkuRecord", {})
+        merge = json.loads(record.get("query", "{}"))
+        if record.get("queryType") != 7 or merge.get("version") != "Merge/1.0" or not any(
+                item.get("leftTable") == "eligibility-live" for item in merge.get("merges", [])):
+            problems.append("LiveSkuRecord must reuse the live ARM query through a native Merge parameter")
+        raw = next((item for item in all_items if item.get("name") == "eligibility-live"), {})
+        request = json.loads(raw.get("content", {}).get("query", "{}"))
+        columns = [column for transformer in request.get("transformers", [])
+                   for column in transformer.get("settings", {}).get("columns", [])]
+        if not any(column.get("columnid") == "SkuRecord" and column.get("path") == "$" for column in columns):
+            problems.append("live access summary requires the complete unmodified SkuRecord")
 
     return problems
 

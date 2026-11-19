@@ -134,15 +134,25 @@ remain Unknown (blank), so these rows must not be summed as fleet capacity.
 Missing or invalid model capacity likewise keeps the entire combination's
 instance count Unknown, not zero.
 
-The read-only Compute SKU record exposes subscription-specific offerability,
-advertised regions/zones and full restrictions. The selection label is downstream
-of row exports so it follows the actual request. Full restriction
-objects preserve type, reason, location and zone scope. Missing data or API
-failure is Unknown, not a passed check or proof of unavailability. No SKU
-restriction does not mean sufficient quota, policy approval or allocation capacity.
-The record is evidence to interpret for the selected placement, not an automatic
-availability verdict: the selected region/zone must be advertised and must not
-have an applicable location/zone restriction.
+The default result is customer-facing, not JSON:
+
+| SKU access | Meaning | Next action |
+| --- | --- | --- |
+| **Green - Not restricted** | The selected region/zone is advertised and no applicable access restriction was returned | No access ticket indicated; continue with quota, policy and migration checks |
+| **Red - Restricted** | A location or zone restriction applies to this subscription and placement | Use the support link to request SKU region/zone access; a quota-coded restriction instead needs a quota increase |
+| **Amber - Unknown** | Missing/failed/malformed evidence, an unadvertised placement or a restriction that cannot be safely interpreted | Retry, verify permissions/placement and contact support if unresolved; never assume clear |
+
+A restriction for another region or zone does not make the selected placement
+red. Zone-only restrictions do not block an unzoned regional placement.
+**Green is SKU access only**, not a guarantee of quota, policy approval or
+physical allocation capacity. Support does not guarantee access or allocation.
+
+**Advanced raw evidence** is opt-in. The same read-only Compute SKU response
+feeds both views: a hidden native Merge text parameter reuses the full SKU
+record, then one ARG query evaluates the restrictions. No second customer click,
+new service or additional ARM SKU request is required. The record's JSON can
+arrive as an object or JSON string; both are normalized and missing data stays
+Unknown. The summary and raw evidence preserve the selected placement context.
 This inspector does not overwrite catalogue recommendations or prerequisite statuses.
 Per-resource quota prerequisites remain Unknown: the separate quota tab evaluates
 the default V5-first fleet model, not an arbitrary V6 path.
@@ -457,7 +467,7 @@ The first row is the dangerous one: a production VM sequenced into wave 1.
 ## The queries
 
 Every Azure Resource Graph query the workbook runs is documented verbatim in
-[`docs/QUERIES.md`](docs/QUERIES.md) - 27 read-only ARG queries plus the selected-row ARM SKU inspector, with the shared base
+[`docs/QUERIES.md`](docs/QUERIES.md) - 28 read-only ARG queries plus the selected-placement ARM SKU inspector, with the shared base
 pipeline shown once and each per-tab tail alongside it. Nothing is hidden: you
 can audit exactly what executes against your tenant before you deploy.
 
@@ -538,16 +548,18 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # all 27 live ARG queries in the current CLI subscription
+python scripts/validate_queries.py    # all 28 live ARG queries in the current CLI subscription
 # Optional quota scope / migration approach (CLI authorization scope remains --subscription):
 # python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 49 offline tests, all 27 live ARG queries, quota and pricing/SQL boundary
+scope: 53 offline tests, all 28 live ARG queries, quota and pricing/SQL boundary
 fixtures, workload-discovery fixtures and exact live target-SKU records. Additional
 ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,
 nine placement cases on both paths and all 22 prerequisite summary counts.
+The access classifier is exercised with 38 synthetic cases, four captured F2/G1
+placements and four complete-query parameter shapes (object/string/empty/null).
 Only explicit ARG throttling is retried, at most twice with visible 30/60-second
 delays; authentication/query errors and exhausted retries still fail validation. Fresh
 SQL guest-runtime verification was not completed because the SQL lab VM's guest
@@ -566,7 +578,7 @@ Without `--offline`, `validate_queries.py` needs `az login` and the
 `resource-graph` CLI extension. It
 verifies that tab links match group visibility conditions, that every query is
 scoped to `{Subscriptions}` and references only declared parameters, and that all
-27 Resource Graph queries execute successfully. Live CLI validation is limited
+28 Resource Graph queries execute successfully. Live CLI validation is limited
 to the current or explicitly supplied subscription; the workbook's tenant scope
 uses the portal's readable subscriptions. Quota queries join indexed quota records
 automatically, without selected-row parameters or per-family ARM requests. Azure Resource Graph throttles
@@ -606,7 +618,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 27 ARG queries while keeping the saved workbook below
+628-size catalogue and all 28 ARG queries while keeping the saved workbook below
 1 MB. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
 
