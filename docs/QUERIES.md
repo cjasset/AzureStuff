@@ -1282,38 +1282,6 @@ resources
 | order by Workload asc, Name asc
 ```
 
-### `discovery-services`
-
-Independent service registrations, even without backing compute. Host-pool, SQL, SAP and managed resource-group metadata are evidence, not runtime proof.
-
-- **Visualization:** table
-- **Scope:** `{Subscriptions}`
-
-```kusto
-resources
-| union batchresources
-| where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.databricks/workspaces',
-    'microsoft.batch/batchaccounts', 'microsoft.batch/batchaccounts/pools', 'microsoft.solutions/applications',
-    'microsoft.redhatopenshift/openshiftclusters', 'microsoft.desktopvirtualization/hostpools',
-    'microsoft.sqlvirtualmachine/sqlvirtualmachines', 'microsoft.workloads/sapvirtualinstances',
-    'microsoft.workloads/sapvirtualinstances/applicationinstances', 'microsoft.workloads/sapvirtualinstances/centralinstances',
-    'microsoft.workloads/sapvirtualinstances/databaseinstances')
-| extend Workload = case(type contains 'microsoft.containerservice/', 'AKS', type contains 'microsoft.databricks/', 'Databricks',
-    type contains 'microsoft.batch/', 'Batch', type contains 'microsoft.desktopvirtualization/', 'AVD',
-    type contains 'microsoft.sqlvirtualmachine/', 'SQL', type contains 'microsoft.workloads/', 'SAP',
-    type contains 'microsoft.redhatopenshift/', 'ARO', 'Managed application')
-| where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'
-| project Name = name, Workload, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
-    ServiceRegion = location, ServiceType = type, ResourceId = id,
-    HostPoolType = tostring(properties.hostPoolType), NodeProvisioningMode = tostring(properties.nodeProvisioningProfile.mode),
-    ManagedResourceGroup = coalesce(tostring(properties.managedResourceGroupId), tostring(properties.nodeResourceGroup)),
-    LinkedVm = tostring(properties.virtualMachineResourceId), ConfiguredPools = properties.agentPoolProfiles,
-    SqlEdition = tostring(properties.sqlImageSku), SqlLicenseType = tostring(properties.sqlServerLicenseType),
-    SapVmDetails = properties.vmDetails,
-    Evidence = 'Indexed service registration/configuration; backing compute and runtime not established'
-| order by Workload asc, Name asc
-```
-
 ### `discovery-pools`
 
 Configured AKS/Batch pool sizes, autoscaler maxima, surge and node targets; not running-node counts or automatic additions to the Compute quota plan.
@@ -1346,6 +1314,38 @@ resources
         'Pool/task migration; validate image, task slots, drainage and autoscale demand'),
     Evidence = 'Configured pool, not observed running nodes; not additive to VM/VMSS inventory', ResourceId = id
 | order by Workload asc, Service asc, Pool asc
+```
+
+### `discovery-services`
+
+Independent service registrations, even without backing compute. Host-pool, SQL, SAP and managed resource-group metadata are evidence, not runtime proof.
+
+- **Visualization:** table
+- **Scope:** `{Subscriptions}`
+
+```kusto
+resources
+| union batchresources
+| where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.databricks/workspaces',
+    'microsoft.batch/batchaccounts', 'microsoft.batch/batchaccounts/pools', 'microsoft.solutions/applications',
+    'microsoft.redhatopenshift/openshiftclusters', 'microsoft.desktopvirtualization/hostpools',
+    'microsoft.sqlvirtualmachine/sqlvirtualmachines', 'microsoft.workloads/sapvirtualinstances',
+    'microsoft.workloads/sapvirtualinstances/applicationinstances', 'microsoft.workloads/sapvirtualinstances/centralinstances',
+    'microsoft.workloads/sapvirtualinstances/databaseinstances')
+| extend Workload = case(type contains 'microsoft.containerservice/', 'AKS', type contains 'microsoft.databricks/', 'Databricks',
+    type contains 'microsoft.batch/', 'Batch', type contains 'microsoft.desktopvirtualization/', 'AVD',
+    type contains 'microsoft.sqlvirtualmachine/', 'SQL', type contains 'microsoft.workloads/', 'SAP',
+    type contains 'microsoft.redhatopenshift/', 'ARO', 'Managed application')
+| where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'
+| project Name = name, Workload, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
+    ServiceRegion = location, ServiceType = type, ResourceId = id,
+    HostPoolType = tostring(properties.hostPoolType), NodeProvisioningMode = tostring(properties.nodeProvisioningProfile.mode),
+    ManagedResourceGroup = coalesce(tostring(properties.managedResourceGroupId), tostring(properties.nodeResourceGroup)),
+    LinkedVm = tostring(properties.virtualMachineResourceId), ConfiguredPools = properties.agentPoolProfiles,
+    SqlEdition = tostring(properties.sqlImageSku), SqlLicenseType = tostring(properties.sqlServerLicenseType),
+    SapVmDetails = properties.vmDetails,
+    Evidence = 'Indexed service registration/configuration; backing compute and runtime not established'
+| order by Workload asc, Name asc
 ```
 
 ## Inventory - Catalogue coverage

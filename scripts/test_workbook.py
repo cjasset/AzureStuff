@@ -218,6 +218,16 @@ class WorkbookDeploymentTests(unittest.TestCase):
                 self.assertTrue(expanded.startswith(original), name)
             for parameter in builder.LOOKUP_PARAMETERS:
                 self.assertNotIn("{" + parameter + "}", expanded)
+        discovery = builder.discovery_items()
+        names = [item["name"] for item in discovery]
+        self.assertEqual(names[names.index("discovery-compute") + 1:names.index("discovery-services")],
+                         ["discovery-pool-intro", "discovery-pools", "discovery-service-intro"])
+        intro = find_item(self.workbook, "discovery-intro")["content"]["json"]
+        self.assertIn("Batch service allocation mode", intro)
+        self.assertIn("Microsoft-managed subscriptions", intro)
+        pool_intro = find_item(self.workbook, "discovery-pool-intro")["content"]["json"]
+        self.assertIn("not additional VM/VMSS rows", pool_intro)
+        self.assertIn("zero nodes", pool_intro)
 
     def test_structure_is_valid(self):
         self.assertEqual(structure_check(self.workbook), [])

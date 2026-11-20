@@ -1501,6 +1501,11 @@ def discovery_items():
             "Owner associations, SQL registrations and SAP hints are discovery evidence, not proof "
             "of running software, healthy HA, stateless nodes or vendor certification. Use the "
             "table filter for resource groups and individual resources; export for full evidence.\n\n"
+            "**Why Batch may be absent from the VM ownership grid:** it only contains VM/VMSS "
+            "resources visible in the selected subscriptions. In **Batch service allocation mode**, "
+            "pool VMs run in Microsoft-managed subscriptions, not your Compute inventory. "
+            "Their ownership and migration method are shown in the **Service-owned pool configurations** "
+            "table immediately below; an absent VM row does not mean Batch is unowned or undiscovered.\n\n"
             "The compute detail includes Flexible members and scale-set models: **do not sum "
             "these rows for fleet capacity**. The quota and coverage inventories count models once. "
             "Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace "
@@ -1511,7 +1516,7 @@ def discovery_items():
             "Windows Server 2019 shared-disk NVMe compatibility needs separate review.",
             "discovery-intro"),
         arg_query(compute_evidence_query(), "discovery-compute", size=1, export=True,
-                  title="Compute ownership, migration method and observed prerequisites",
+                  title="Observed subscription VM / VMSS ownership and prerequisites",
                   grid=grid_settings(
                       {"Name": "22ch", "Workload": "24ch", "MigrationMethod": "65ch",
                        "CatalogueCoverage": "22ch", "ResourceGroup": "22ch"},
@@ -1520,24 +1525,31 @@ def discovery_items():
                           "NvmeOsReference", "ManaOsReference", "OsReferenceChecked",
                           "NvmeDriverValidation", "ManaDriverValidation")], filter=True)),
         text_item(
-            "### Independent service and configured-pool coverage\n\n"
+            "### Service-owned pool configurations\n\n"
+            "This is the ownership view for **Batch service-mode compute**, including pools with "
+            "zero nodes. Each Batch pool belongs to its Batch account; use the **Batch pool/task "
+            "migration workflow**, not a direct VM resize. AKS pools are also shown as service-owned "
+            "configuration. These are **pool records, not additional VM/VMSS rows**; do not add them "
+            "to fleet totals or subscription Compute quota demand.\n\n"
+            "Configured sizes and lifecycle classifications remain relevant when nodes are stopped. "
+            "**Autoscaler maxima, surge and Batch demand are not automatically added to the existing "
+            "Compute quota plan**; validate service-specific quotas and peak capacity separately. "
+            "Empty/missing pool profiles do not prove that the service has no nodes.",
+            "discovery-pool-intro"),
+        arg_query(configured_pools_query(), "discovery-pools", size=1, export=True,
+                  title="Service-owned AKS / Batch pools, lifecycle and migration method (not VM inventory)",
+                  grid=grid_settings({"Service": "28ch", "Pool": "20ch", "VmSize": "22ch"},
+                                     [fmt("ResourceId", 5)], filter=True)),
+        text_item(
+            "### Independent service registrations\n\n"
             "These registrations remain visible without observable backing VMs. Counts are not "
             "additive to compute inventory. A service's location need not be its VM location. "
             "AVD host-pool type is shown here; SQL groups do not prove active Always On membership. "
-            "Serverless/terminated Databricks compute and guest application roles are not enumerated.\n\n"
-            "Configured AKS/Batch pools are planning evidence, not running-node counts. "
-            "Zero-node and autoscaling pools can still need migration. **Autoscaler maxima, surge "
-            "and Batch demand are not automatically added to the existing Compute quota plan**; "
-            "validate those service-specific peaks separately. Empty/missing pool profiles do not "
-            "prove that the cluster has no nodes.",
+            "Serverless/terminated Databricks compute and guest application roles are not enumerated.",
             "discovery-service-intro"),
         arg_query(service_inventory_query(), "discovery-services", size=1, export=True,
                   title="Services, including registrations without visible backing compute",
                   grid=grid_settings({"Name": "28ch", "Workload": "18ch", "ResourceGroup": "24ch"},
-                                     [fmt("ResourceId", 5)], filter=True)),
-        arg_query(configured_pools_query(), "discovery-pools", size=1, export=True,
-                  title="Configured AKS / Batch pools, autoscaling and migration method",
-                  grid=grid_settings({"Service": "28ch", "Pool": "20ch", "VmSize": "22ch"},
                                      [fmt("ResourceId", 5)], filter=True)),
     ]
 

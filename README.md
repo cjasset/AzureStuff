@@ -113,6 +113,12 @@ visibility stays Unknown. Flexible member details and service/pool registrations
 must **not** be summed with model capacity.
 
 Independent service inventory retains services with no visible backing VMs.
+The ownership view separates observed subscription VM/VMSS rows from
+**Service-owned pool configurations**, shown immediately underneath. In Batch
+service allocation mode, pool VMs are in Microsoft-managed subscriptions and
+cannot appear as local Compute ownership rows. Batch ownership, configured
+sizes, lifecycle and pool/task migration guidance remain visible in the pool
+table, including at zero nodes; these records are not additional fleet VMs.
 AVD host-pool type and configured AKS/Batch pool demand are exposed. Autoscaler
 maxima, surge, Batch service quotas and transient/serverless compute are **not**
 automatically incorporated into the existing Compute VM/VMSS quota calculation.

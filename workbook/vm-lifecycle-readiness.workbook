@@ -1147,7 +1147,7 @@
                 {
                   "type": 1,
                   "content": {
-                    "json": "## Workload ownership and observed evidence\n\nIdentify the owning service before choosing a resize or rebuild workflow. **No application complexity or migration approval is inferred from a platform score.** Owner associations, SQL registrations and SAP hints are discovery evidence, not proof of running software, healthy HA, stateless nodes or vendor certification. Use the table filter for resource groups and individual resources; export for full evidence.\n\nThe compute detail includes Flexible members and scale-set models: **do not sum these rows for fleet capacity**. The quota and coverage inventories count models once. Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace plans are rebuild dependencies, not blanket resize blockers.\n\nOS hints use a deliberately limited subset of the official NVMe/MANA lists, checked 18 November 2026. Other distributions/versions remain **Review**, not unsupported. Guest metadata takes precedence over old image labels; neither proves driver or boot readiness. Windows Server 2019 shared-disk NVMe compatibility needs separate review."
+                    "json": "## Workload ownership and observed evidence\n\nIdentify the owning service before choosing a resize or rebuild workflow. **No application complexity or migration approval is inferred from a platform score.** Owner associations, SQL registrations and SAP hints are discovery evidence, not proof of running software, healthy HA, stateless nodes or vendor certification. Use the table filter for resource groups and individual resources; export for full evidence.\n\n**Why Batch may be absent from the VM ownership grid:** it only contains VM/VMSS resources visible in the selected subscriptions. In **Batch service allocation mode**, pool VMs run in Microsoft-managed subscriptions, not your Compute inventory. Their ownership and migration method are shown in the **Service-owned pool configurations** table immediately below; an absent VM row does not mean Batch is unowned or undiscovered.\n\nThe compute detail includes Flexible members and scale-set models: **do not sum these rows for fleet capacity**. The quota and coverage inventories count models once. Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace plans are rebuild dependencies, not blanket resize blockers.\n\nOS hints use a deliberately limited subset of the official NVMe/MANA lists, checked 18 November 2026. Other distributions/versions remain **Review**, not unsupported. Guest metadata takes precedence over old image labels; neither proves driver or boot readiness. Windows Server 2019 shared-disk NVMe compatibility needs separate review."
                   },
                   "name": "discovery-intro",
                   "styleSettings": {
@@ -1168,7 +1168,7 @@
                     ],
                     "visualization": "table",
                     "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
-                    "title": "Compute ownership, migration method and observed prerequisites",
+                    "title": "Observed subscription VM / VMSS ownership and prerequisites",
                     "gridSettings": {
                       "formatters": [
                         {
@@ -1258,7 +1258,68 @@
                 {
                   "type": 1,
                   "content": {
-                    "json": "### Independent service and configured-pool coverage\n\nThese registrations remain visible without observable backing VMs. Counts are not additive to compute inventory. A service's location need not be its VM location. AVD host-pool type is shown here; SQL groups do not prove active Always On membership. Serverless/terminated Databricks compute and guest application roles are not enumerated.\n\nConfigured AKS/Batch pools are planning evidence, not running-node counts. Zero-node and autoscaling pools can still need migration. **Autoscaler maxima, surge and Batch demand are not automatically added to the existing Compute quota plan**; validate those service-specific peaks separately. Empty/missing pool profiles do not prove that the cluster has no nodes."
+                    "json": "### Service-owned pool configurations\n\nThis is the ownership view for **Batch service-mode compute**, including pools with zero nodes. Each Batch pool belongs to its Batch account; use the **Batch pool/task migration workflow**, not a direct VM resize. AKS pools are also shown as service-owned configuration. These are **pool records, not additional VM/VMSS rows**; do not add them to fleet totals or subscription Compute quota demand.\n\nConfigured sizes and lifecycle classifications remain relevant when nodes are stopped. **Autoscaler maxima, surge and Batch demand are not automatically added to the existing Compute quota plan**; validate service-specific quotas and peak capacity separately. Empty/missing pool profiles do not prove that the service has no nodes."
+                  },
+                  "name": "discovery-pool-intro",
+                  "styleSettings": {
+                    "margin": "0",
+                    "padding": "0"
+                  }
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "query": "resources\n| union batchresources\n| where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.batch/batchaccounts/pools')\n| extend Workload = iff(type =~ 'microsoft.containerservice/managedclusters', 'AKS', 'Batch')\n| where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'\n| extend Pools = iff(Workload == 'AKS', properties.agentPoolProfiles, pack_array(properties))\n| mv-expand Pool = Pools limit 2000\n| extend VmSize = tostring(Pool.vmSize)\n| extend CatalogueRecord = tostring(parse_json(tolower('{LifecycleSkuMap}'))[tolower(VmSize)])\n| project Service = name, Workload, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n    Region = location, Pool = iff(Workload == 'AKS', tostring(Pool.name), name), VmSize,\n    Lifecycle = iff(isempty(CatalogueRecord), 'Not assessed - no catalogue match', toupper(tostring(split(CatalogueRecord, '|')[0]))),\n    ConfiguredNodes = toint(Pool['count']), Autoscaling = tostring(Pool.enableAutoScaling),\n    MinimumNodes = toint(Pool.minCount), MaximumNodes = toint(Pool.maxCount),\n    MaxSurge = tostring(Pool.upgradeSettings.maxSurge), OsSku = tostring(Pool.osSKU),\n    OsDiskType = tostring(Pool.osDiskType), Priority = tostring(coalesce(Pool.scaleSetPriority, Pool.scaleSettings.fixedScale.targetLowPriorityNodes)),\n    BatchCurrentDedicated = toint(Pool.currentDedicatedNodes), BatchCurrentLowPriority = toint(Pool.currentLowPriorityNodes),\n    BatchTargetDedicated = toint(Pool.scaleSettings.fixedScale.targetDedicatedNodes),\n    BatchTargetLowPriority = toint(Pool.scaleSettings.fixedScale.targetLowPriorityNodes),\n    BatchAutoscaleFormula = tostring(Pool.scaleSettings.autoScale.formula),\n    MigrationMethod = iff(Workload == 'AKS', 'Node-pool migration; validate PDBs, persistence, surge and autoscaler maximum',\n        'Pool/task migration; validate image, task slots, drainage and autoscale demand'),\n    Evidence = 'Configured pool, not observed running nodes; not additive to VM/VMSS inventory', ResourceId = id\n| order by Workload asc, Service asc, Pool asc",
+                    "size": 1,
+                    "queryType": 1,
+                    "resourceType": "microsoft.resourcegraph/resources",
+                    "crossComponentResources": [
+                      "{Subscriptions}"
+                    ],
+                    "visualization": "table",
+                    "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
+                    "title": "Service-owned AKS / Batch pools, lifecycle and migration method (not VM inventory)",
+                    "gridSettings": {
+                      "formatters": [
+                        {
+                          "columnMatch": "Service",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "28ch"
+                          }
+                        },
+                        {
+                          "columnMatch": "Pool",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "20ch"
+                          }
+                        },
+                        {
+                          "columnMatch": "VmSize",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "22ch"
+                          }
+                        },
+                        {
+                          "columnMatch": "ResourceId",
+                          "formatter": 5
+                        }
+                      ],
+                      "rowLimit": 10,
+                      "filter": true
+                    },
+                    "showExportToExcel": true,
+                    "exportToExcelOptions": "all"
+                  },
+                  "name": "discovery-pools"
+                },
+                {
+                  "type": 1,
+                  "content": {
+                    "json": "### Independent service registrations\n\nThese registrations remain visible without observable backing VMs. Counts are not additive to compute inventory. A service's location need not be its VM location. AVD host-pool type is shown here; SQL groups do not prove active Always On membership. Serverless/terminated Databricks compute and guest application roles are not enumerated."
                   },
                   "name": "discovery-service-intro",
                   "styleSettings": {
@@ -1315,56 +1376,6 @@
                     "exportToExcelOptions": "all"
                   },
                   "name": "discovery-services"
-                },
-                {
-                  "type": 3,
-                  "content": {
-                    "version": "KqlItem/1.0",
-                    "query": "resources\n| union batchresources\n| where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.batch/batchaccounts/pools')\n| extend Workload = iff(type =~ 'microsoft.containerservice/managedclusters', 'AKS', 'Batch')\n| where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'\n| extend Pools = iff(Workload == 'AKS', properties.agentPoolProfiles, pack_array(properties))\n| mv-expand Pool = Pools limit 2000\n| extend VmSize = tostring(Pool.vmSize)\n| extend CatalogueRecord = tostring(parse_json(tolower('{LifecycleSkuMap}'))[tolower(VmSize)])\n| project Service = name, Workload, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,\n    Region = location, Pool = iff(Workload == 'AKS', tostring(Pool.name), name), VmSize,\n    Lifecycle = iff(isempty(CatalogueRecord), 'Not assessed - no catalogue match', toupper(tostring(split(CatalogueRecord, '|')[0]))),\n    ConfiguredNodes = toint(Pool['count']), Autoscaling = tostring(Pool.enableAutoScaling),\n    MinimumNodes = toint(Pool.minCount), MaximumNodes = toint(Pool.maxCount),\n    MaxSurge = tostring(Pool.upgradeSettings.maxSurge), OsSku = tostring(Pool.osSKU),\n    OsDiskType = tostring(Pool.osDiskType), Priority = tostring(coalesce(Pool.scaleSetPriority, Pool.scaleSettings.fixedScale.targetLowPriorityNodes)),\n    BatchCurrentDedicated = toint(Pool.currentDedicatedNodes), BatchCurrentLowPriority = toint(Pool.currentLowPriorityNodes),\n    BatchTargetDedicated = toint(Pool.scaleSettings.fixedScale.targetDedicatedNodes),\n    BatchTargetLowPriority = toint(Pool.scaleSettings.fixedScale.targetLowPriorityNodes),\n    BatchAutoscaleFormula = tostring(Pool.scaleSettings.autoScale.formula),\n    MigrationMethod = iff(Workload == 'AKS', 'Node-pool migration; validate PDBs, persistence, surge and autoscaler maximum',\n        'Pool/task migration; validate image, task slots, drainage and autoscale demand'),\n    Evidence = 'Configured pool, not observed running nodes; not additive to VM/VMSS inventory', ResourceId = id\n| order by Workload asc, Service asc, Pool asc",
-                    "size": 1,
-                    "queryType": 1,
-                    "resourceType": "microsoft.resourcegraph/resources",
-                    "crossComponentResources": [
-                      "{Subscriptions}"
-                    ],
-                    "visualization": "table",
-                    "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
-                    "title": "Configured AKS / Batch pools, autoscaling and migration method",
-                    "gridSettings": {
-                      "formatters": [
-                        {
-                          "columnMatch": "Service",
-                          "formatter": 0,
-                          "formatOptions": {
-                            "customColumnWidthSetting": "28ch"
-                          }
-                        },
-                        {
-                          "columnMatch": "Pool",
-                          "formatter": 0,
-                          "formatOptions": {
-                            "customColumnWidthSetting": "20ch"
-                          }
-                        },
-                        {
-                          "columnMatch": "VmSize",
-                          "formatter": 0,
-                          "formatOptions": {
-                            "customColumnWidthSetting": "22ch"
-                          }
-                        },
-                        {
-                          "columnMatch": "ResourceId",
-                          "formatter": 5
-                        }
-                      ],
-                      "rowLimit": 10,
-                      "filter": true
-                    },
-                    "showExportToExcel": true,
-                    "exportToExcelOptions": "all"
-                  },
-                  "name": "discovery-pools"
                 }
               ]
             },
