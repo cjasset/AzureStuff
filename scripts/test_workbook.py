@@ -194,6 +194,11 @@ class WorkbookDeploymentTests(unittest.TestCase):
             elif name.startswith("discovery-"):
                 self.assertNotIn("| where isnotempty(Rec)", expanded)
                 self.assertIn("{DiscoveryWorkload}", expanded)
+                if name in ("discovery-services", "discovery-pools"):
+                    self.assertIn("| union batchresources", expanded)
+                if name == "discovery-pools":
+                    self.assertIn("[tolower(VmSize)]", expanded)
+                    self.assertIn("toupper(tostring(split(CatalogueRecord", expanded)
             elif name == "regional-price-grid":
                 self.assertEqual(expanded, builder.regional_price_query(self.data))
             elif name == "sql-modernization-grid":

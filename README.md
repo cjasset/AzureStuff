@@ -609,6 +609,12 @@ building from the authoring tree.
 
 ### Implementation notes
 
+AKS registrations and Batch accounts are indexed in ARG `resources`, while
+Batch pools are indexed in `batchresources`. Service and configured-pool
+discovery unions both tables. Batch returns lower-case VM sizes, so configured
+pool lifecycle matching is case-insensitive and retains the source VM-size
+value. Compute inventory and quota planning do not add Batch-service nodes.
+
 Azure Resource Graph supports neither `let` nor `datatable`, so the lifecycle
 lookup is used in each query as a `parse_json('{...}')` dynamic literal indexed
 by VM size. The lookup data is stored once in hidden workbook text parameters

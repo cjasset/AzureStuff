@@ -195,6 +195,7 @@ def compute_evidence_query():
 
 def service_inventory_query():
     return """resources
+| union batchresources
 | where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.databricks/workspaces',
     'microsoft.batch/batchaccounts', 'microsoft.batch/batchaccounts/pools', 'microsoft.solutions/applications',
     'microsoft.redhatopenshift/openshiftclusters', 'microsoft.desktopvirtualization/hostpools',
@@ -219,16 +220,17 @@ def service_inventory_query():
 
 def configured_pools_query():
     return """resources
+| union batchresources
 | where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.batch/batchaccounts/pools')
 | extend Workload = iff(type =~ 'microsoft.containerservice/managedclusters', 'AKS', 'Batch')
 | where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'
 | extend Pools = iff(Workload == 'AKS', properties.agentPoolProfiles, pack_array(properties))
 | mv-expand Pool = Pools limit 2000
 | extend VmSize = tostring(Pool.vmSize)
-| extend CatalogueRecord = tostring(parse_json('{LifecycleSkuMap}')[VmSize])
+| extend CatalogueRecord = tostring(parse_json(tolower('{LifecycleSkuMap}'))[tolower(VmSize)])
 | project Service = name, Workload, ResourceGroup = resourceGroup, SubscriptionId = subscriptionId,
     Region = location, Pool = iff(Workload == 'AKS', tostring(Pool.name), name), VmSize,
-    Lifecycle = iff(isempty(CatalogueRecord), 'Not assessed - no catalogue match', tostring(split(CatalogueRecord, '|')[0])),
+    Lifecycle = iff(isempty(CatalogueRecord), 'Not assessed - no catalogue match', toupper(tostring(split(CatalogueRecord, '|')[0]))),
     ConfiguredNodes = toint(Pool['count']), Autoscaling = tostring(Pool.enableAutoScaling),
     MinimumNodes = toint(Pool.minCount), MaximumNodes = toint(Pool.maxCount),
     MaxSurge = tostring(Pool.upgradeSettings.maxSurge), OsSku = tostring(Pool.osSKU),
