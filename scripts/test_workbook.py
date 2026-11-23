@@ -79,7 +79,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
 
     def test_workflow_report_selectors_are_independent_and_stage_scoped(self):
         expected = {
-            "inventory": ("InventoryView", ["overview", "impacted", "discovery", "coverage"]),
+            "inventory": ("InventoryView", ["overview", "impacted", "reservations", "discovery", "coverage"]),
             "assess": ("AssessView", ["paths", "routes", "prereq", "sql"]),
             "planning": ("PlanView", ["availability", "quota", "mapping", "alternatives", "plan"]),
         }
@@ -203,10 +203,13 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 33)
+        self.assertEqual(len(queries), 35)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
-            if name == "eligibility-status":
+            if name.startswith("reservation-"):
+                self.assertIn("{ReservationPageRecord:json}", query)
+                self.assertNotIn("resources\n", query)
+            elif name == "eligibility-status":
                 self.assertEqual(query, builder.live_access_query())
             elif name == "eligibility-fit":
                 self.assertTrue(expanded.startswith(builder.expand_lookups(
@@ -355,7 +358,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         key = find_item(self.workbook, "ov-commercial-key")["content"]["json"]
         for text in ("1 February 2027", "1 July 2026", "Passed", "Upcoming",
                      "No cutoff in captured catalogue", "Coverage not assessed",
-                     "does not read your reservations", "Regional price exposure"):
+                     "this summary does not read your reservations", "Reservation exposure", "Regional price exposure"):
             self.assertIn(text, key)
 
     def test_compact_assessment_keeps_all_checks_in_details_and_export(self):
@@ -508,7 +511,8 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in capabilities["content"]["items"]],
                          ["eligibility-fit-intro", "eligibility-fit"])
         arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
-        self.assertEqual({item["name"] for item in arms}, {"eligibility-live", "discovery-batch-live"})
+        self.assertEqual({item["name"] for item in arms},
+                         {"eligibility-live", "discovery-batch-live", "reservation-live"})
 
     def test_access_summary_has_red_green_unknown_and_raw_is_opt_in(self):
         content = find_item(self.workbook, "eligibility-status")["content"]

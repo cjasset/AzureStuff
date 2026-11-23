@@ -24,6 +24,8 @@ from migration_guidance import (CLOSEOUT, COMMON_GATES, ROUTES, WORKLOADS,
 from workload_evidence import (compute_evidence_query, configured_pools_query,
                                os_eligibility_query, service_inventory_query,
                                sql_evidence_query)
+from reservation_evidence import (FIRST_PAGE, coverage_query as reservation_coverage_query,
+                                  inventory_query as reservation_inventory_query)
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -1096,6 +1098,7 @@ WORKFLOW_STAGES = [
 WORKFLOW_REPORTS = {
     "inventory": ("InventoryView", [
         ("Fleet overview", "overview"), ("Retirement & pricing", "impacted"),
+        ("Reservation exposure", "reservations"),
         ("Workloads & owners", "discovery"), ("Catalogue coverage", "coverage")]),
     "assess": ("AssessView", [
         ("V5 / V6 / V7 paths", "paths"), ("Routes & gates", "routes"), ("Required actions", "prereq"),
@@ -1119,7 +1122,8 @@ WORKFLOW_GUIDANCE = {
     "inventory": (
         "1. Inventory - what do I have, and why should I act?",
         "Identify affected resources, workload owners and gaps in coverage.",
-        "Review the fleet overview, separate retirement from regional pricing exposure, identify "
+        "Review the fleet overview, separate retirement from regional pricing exposure and purchased "
+        "Reservation exposure, identify "
         "service ownership, and inspect Catalogue coverage for sizes not assessed by the captured map.",
         "Export an affected-workload list, confirm scope and deadlines, and assign owners to "
         "unmapped SKUs and resources with missing or conflicting ownership signals.",
@@ -1966,6 +1970,96 @@ def eligibility_items(base):
     ]
 
 
+def reservation_items():
+    def merge_parameter(name, table, column):
+        merge_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{name}:{table}:{column}"))
+        return {
+            "version": "KqlParameterItem/1.0", "name": name, "type": 1,
+            "isHiddenWhenLocked": True, "value": "", "queryType": 7,
+            "query": json.dumps({
+                "version": "Merge/1.0",
+                "merges": [{"id": merge_id, "mergeType": "table", "leftTable": table}],
+                "projectRename": [{"originalName": f"[{table}].{column}",
+                                   "mergedName": column, "fromId": merge_id}],
+            }),
+        }
+
+    raw = {
+        "type": 3, "name": "reservation-live", "conditionalVisibility": {
+            "parameterName": "ReservationEvidence", "comparison": "isEqualTo", "value": "raw"},
+        "content": {
+            "version": "KqlItem/1.0", "queryType": 12, "query": json.dumps({
+                "version": "ARMEndpoint/1.0", "method": "GET", "data": None, "headers": [],
+                "path": "{ReservationPagePath}", "urlParams": [], "batchDisabled": False,
+                "transformers": [{"type": "jsonpath", "settings": {
+                    "tablePath": "$", "columns": [{"path": "$", "columnid": "Page"}]}}],
+            }),
+            "title": "Advanced: reservation API page", "size": 1, "visualization": "table",
+            "gridSettings": grid_settings({"Page": "100%"}),
+            "noDataMessage": "Unknown: no reservation response. Check API errors and reservation-level permissions.",
+        },
+    }
+    next_page = navigation_item("reservation-next-page", "ReservationPagePath",
+                               [("Next reservation page", "{ReservationNextPagePath}")], style="paragraph")
+    next_page["conditionalVisibility"] = {
+        "parameterName": "ReservationNextPagePath", "comparison": "isNotEqualTo", "value": ""}
+    return [
+        text_item(
+            "## Purchased reservation exposure\n\n"
+            "Actual reservation records visible to you in the **current tenant**, not inferred from VMs. "
+            "This scope is independent of the VM subscription/lifecycle filters and includes records "
+            "without a deployed VM. **Reservation access is separate from subscription Reader access**; "
+            "[check permissions](https://learn.microsoft.com/azure/cost-management-billing/reservations/view-reservations).\n\n"
+            "**Browse every API page** using Next reservation page, even when a page has no impacted matches. "
+            "The default includes impacted and unassessed VM SKUs, including expired/cancelled historical "
+            "records. Select Details for term, renewal, applied scope and IDs. "
+            "**An empty or access-limited result does not prove no reservations exist.**\n\n"
+            "Exposure is a planning signal, not lost value, utilization or VM benefit attribution. "
+            "Series cutoffs are not customer expiry dates; pricing signals do not reprice existing RI terms.",
+            "reservation-intro"),
+        {"type": 9, "name": "reservation-controls", "content": {
+            "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [
+                {"version": "KqlParameterItem/1.0", "name": "ReservationPagePath", "type": 1,
+                 "value": FIRST_PAGE, "isHiddenWhenLocked": True, "isGlobal": True},
+                *[{"version": "KqlParameterItem/1.0", "name": name, "type": 2, "label": label,
+                   "isRequired": True, "value": default,
+                   "jsonData": json.dumps([{"value": value, "label": text} for value, text in choices])}
+                  for name, label, default, choices in (
+                      ("ReservationView", "Show reservations", "affected",
+                       [("affected", "Impacted + unassessed VM SKUs"), ("all", "All visible VM reservations")]),
+                      ("ReservationEvidence", "Result detail", "summary",
+                       [("summary", "Customer summary"), ("raw", "Advanced raw evidence")]))],
+            ]}},
+        raw,
+        {"type": 9, "name": "reservation-page-parameter", "content": {
+            "version": "KqlParameterItem/1.0", "parameters": [
+                merge_parameter("ReservationPageRecord", "reservation-live", "Page")]}},
+        arg_query(reservation_coverage_query(), "reservation-coverage", size=1,
+                  title="Reservation visibility and page coverage",
+                  grid=grid_settings({"Evidence": "65%", "RowsInPage": "10%", "Scope": "25%"},
+                                     [fmt("NextPagePath", 5)])),
+        {"type": 9, "name": "reservation-next-parameter", "content": {
+            "version": "KqlParameterItem/1.0", "parameters": [
+                merge_parameter("ReservationNextPagePath", "reservation-coverage", "NextPagePath")]}},
+        arg_query(reservation_inventory_query(REGIONAL_PRICE_INCREASES, REGIONAL_PRICE_EXCLUDED_SERIES,
+                                              REGIONAL_PRICE_V7_EXCLUSION_PATTERN),
+                  "reservation-inventory", size=1, export=True, title="Purchased VM reservations - current API page",
+                  grid=grid_settings(
+                      {"ReservationName": "22ch", "ReservedSku": "22ch", "Region": "16ch",
+                       "Quantity": "9ch", "Expiry": "13ch", "State": "15ch", "Exposure": "30ch", "Details": "10ch"},
+                      [fmt("Details", 1, formatOptions={"linkTarget": "GenericDetails", "linkIsContextBlade": True})]
+                      + [fmt(name, 5) for name in (
+                          "Term", "AutoRenew", "TermState", "AppliedScope", "AppliedScopes",
+                          "AppliedScopeProperties", "PurchaseDate", "Archived", "Lifecycle", "Series",
+                          "RetirementDate", "SeriesRiCutoff", "SeriesPriceSignal", "RegionalPriceSignal", "ReservationId")],
+                      filter=True),
+                  extra={"noDataMessage": "No matching VM reservations on this API page. Check coverage/errors, view All visible VM reservations and continue through remaining pages; this is not proof of no RI exposure."}),
+        next_page,
+        navigation_item("reservation-first-page", "ReservationPagePath",
+                        [("Return to first reservation page", FIRST_PAGE)], style="paragraph"),
+    ]
+
+
 def build(data):
     sku_map, spec_map, url_map, tgt_regions, region_ids = build_lookups(data)
     path_lookups = {generation: build_lookups(data, path_generation=generation)
@@ -2166,6 +2260,7 @@ def build(data):
         assessment_key(),
     ]))
     items.append(group_item("grp-discovery", "discovery", discovery_items()))
+    items.append(group_item("grp-reservations", "reservations", reservation_items()))
     items.append(group_item("grp-availability", "availability", eligibility_items(base_query(
         sku_map, tgt_regions, region_ids, include_optional=False, use_lookup_parameters=True,
         include_placement_zones=True))))
@@ -2281,7 +2376,7 @@ def build(data):
 | where PriceUpdate2027 == 'Yes' or RiStatus startswith 'Series'
 | order by Instances desc""",
         "ov-commercial", size=1, width="50", max_width="760px",
-        title="Commercial impact - pricing and reservations",
+        title="Series commercial signals - pricing and RI cutoffs",
         grid=grid_settings(
             {"Series": "17%", "PriceUpdate2027": "24%", "RiStatus": "42%",
              "Instances": "17%"},
@@ -2310,8 +2405,9 @@ def build(data):
         "(1 July 2026 in the captured catalogue). **Passed** means that date is past; "
         "**Upcoming** means it has not passed; **No cutoff in captured catalogue** means no date "
         "is recorded, not guaranteed RI availability. Affected terms differ by series; see Methodology.\n"
-        "- **Coverage not assessed:** this workbook does not read your reservations, remaining "
-        "terms, expiry dates or negotiated discounts. A cutoff does not mean an existing RI "
+        "- **Coverage not assessed:** this summary does not read your reservations, remaining "
+        "terms, expiry dates or negotiated discounts. Use **Inventory > Reservation exposure** "
+        "for visible purchased records. A cutoff does not mean an existing RI "
         "expired or the VM is now billed at PAYG.\n"
         "- **Regional price exposure** is a separate report under Inventory > Retirement & pricing. "
         "Modern VMs can appear there without retiring. Do not combine the two signals as a price forecast.",
@@ -2528,7 +2624,8 @@ def build(data):
         "applies to the series, and the series-wide RI purchase/renewal cutoff.\n\n"
         "> Reserved Instance purchases and renewals for these series ended **1 July 2026**. "
         "**This is not a customer's reservation expiry date or evidence of current pay-as-you-go billing.** "
-        "Existing reservation terms, matching coverage, other discounts and billing are not inspected. "
+        "See Inventory > Reservation exposure for visible purchased records. Matching benefit coverage, "
+        "other discounts and billing are not inspected. "
         "([Azure update 560948](https://azure.microsoft.com/updates?id=560948)). "
         "For the rates that apply to your agreement, see the official "
         "[Windows](https://azure.microsoft.com/pricing/details/virtual-machines/windows/) and "
@@ -2837,7 +2934,8 @@ def build(data):
         "**Reserved Instances.** Purchases and renewals ended **1 July 2026** for one-year "
         "reservations on Av2, Amv2, Bv1, D, Ds, Dv2, Dsv2, F, Fs, Fsv2, G, Gs, Ls and Lsv2, "
         "and for both one- and three-year reservations on Dv3, Dsv3, Ev3 and Esv3. Existing "
-        "reservation terms and billing coverage are not read. The cutoff is **not the customer's "
+        "reservation records are available separately in Inventory > Reservation exposure; "
+        "billing coverage is not assessed. The cutoff is **not the customer's "
         "reservation expiry**, and does not establish pay-as-you-go billing or the absence of other discounts "
         "([Azure update 560948](https://azure.microsoft.com/updates?id=560948)).\n\n"
         "**Cloud coverage.** The two changes do not have the same scope:\n\n"
@@ -2913,7 +3011,7 @@ def build(data):
         "storage account, Function, automation, agent or customer data collection is required. "
         "Lookups and guidance are embedded; the deployed workbook does not download catalogues "
         "or run community tools. It reads built-in Azure Resource Graph tables and authenticated "
-        "read-only Compute/Batch ARM APIs using your permissions. It is not offline: Azure "
+        "read-only Compute/Batch/Reservations ARM APIs using your permissions. It is not offline: Azure "
         "control-plane access is required. Documentation links are optional references, not data feeds.\n\n"
         f"**Captured catalogue:** {data['_meta']['generated']} (subscription-view snapshot, not today's offerability). "
         "**Lifecycle overrides:** 28 September 2026 announcements for v3 EOL, pricing and restrictions. "

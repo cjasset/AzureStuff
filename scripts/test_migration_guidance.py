@@ -151,7 +151,7 @@ class GuidedMigrationTests(unittest.TestCase):
             self.assertIn(phrase, provenance)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 33)
+        self.assertEqual(len(queries), 35)
 
 
 if __name__ == "__main__":

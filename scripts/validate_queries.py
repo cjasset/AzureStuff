@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from build_workbook import LOOKUP_PARAMETERS, WORKBOOK_SIZE_LIMIT, expand_lookups, lookup_values
+from reservation_evidence import FIRST_PAGE
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(os.path.dirname(HERE), "out")
@@ -29,6 +30,8 @@ SUBSTITUTIONS = {
     "{LiveRegion}": "",
     "{LiveZone}": "",
     "{LiveTarget}": "",
+    "{ReservationPageRecord:json}": "{}",
+    "{ReservationView}": "affected",
 }
 
 def azure_json(arguments):
@@ -137,9 +140,14 @@ def structure_check(wb):
     destinations = set()
     for l in links:
         for link in l["content"]["links"]:
-            destinations.add((link.get("cellValue"), link["subTarget"]))
             if link.get("linkTarget") != "parameter":
                 problems.append(f"link {link.get('linkLabel')} is not a parameter link")
+            if l["name"] in ("reservation-next-page", "reservation-first-page"):
+                expected = "{ReservationNextPagePath}" if l["name"] == "reservation-next-page" else FIRST_PAGE
+                if link.get("cellValue") != "ReservationPagePath" or link.get("subTarget") != expected:
+                    problems.append("reservation paging must use the validated continuation or first page")
+            else:
+                destinations.add((link.get("cellValue"), link["subTarget"]))
 
     navigation_parameters = {parameter for parameter, _ in destinations}
     groups = [i for i in all_items if i.get("type") == 12 and i.get("conditionalVisibility")]
@@ -175,6 +183,19 @@ def structure_check(wb):
             problems.append(f"navigation parameter {parameter} has no valid default")
     if not declared.get("WorkflowStage", {}).get("isGlobal"):
         problems.append("WorkflowStage must be global for footer navigation")
+    if "reservation-live" in {i["name"] for i in all_items}:
+        page = declared.get("ReservationPagePath", {})
+        if not page.get("isGlobal") or page.get("value") != FIRST_PAGE:
+            problems.append("ReservationPagePath must be global with the exact read-only first page")
+        for parameter, table, column in (
+                ("ReservationPageRecord", "reservation-live", "Page"),
+                ("ReservationNextPagePath", "reservation-coverage", "NextPagePath")):
+            record = declared.get(parameter, {})
+            merge = json.loads(record.get("query", "{}"))
+            if record.get("queryType") != 7 or not any(
+                    m.get("leftTable") == table for m in merge.get("merges", [])) or not any(
+                    p.get("originalName") == f"[{table}].{column}" for p in merge.get("projectRename", [])):
+                problems.append(f"{parameter} must reuse its native Merge source")
     for required in ("Subscriptions", "LifecycleFilter"):
         if required not in params:
             problems.append(f"missing parameter {required}")
@@ -207,12 +228,14 @@ def structure_check(wb):
             c = node.get("content", {})
             if isinstance(c, dict) and c.get("queryType") == 12:
                 request = json.loads(c["query"])
-                if request.get("method") != "GETARRAY" or request.get("version") != "ARMEndpoint/1.0":
+                expected_method = "GET" if node.get("name") == "reservation-live" else "GETARRAY"
+                if request.get("method") != expected_method or request.get("version") != "ARMEndpoint/1.0":
                     problems.append(f"{node.get('name')}: live inspection must be a read-only ARM array request")
                 endpoints = {
                     "eligibility-live": "/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus"
                                         "?api-version=2021-07-01&$filter=location eq '{LiveRegion}'",
                     "discovery-batch-live": "{BatchAccountId}/pools?api-version=2024-07-01",
+                    "reservation-live": "{ReservationPagePath}",
                 }
                 if node.get("name") not in endpoints or request.get("path") != endpoints[node["name"]]:
                     problems.append(f"{node.get('name')}: unexpected live inspection endpoint/scope")

@@ -25,7 +25,8 @@ The workbook is **not offline**: customers need authenticated Azure control-plan
 access and read permissions for the subscriptions and resource types they inspect.
 It reads Azure's built-in Resource Graph tables (including `QuotaResources`,
 `AdvisorResources`, `BatchResources` and `DesktopVirtualizationResources`) and
-the existing read-only Compute SKU and Batch pool ARM endpoints. Those built-in
+the existing read-only Compute SKU, Batch pool and Reservations ARM endpoints. Reservation
+visibility requires reservation-level permissions, separately from subscription Reader. Those built-in
 tables are Azure-managed indexes, not tables the customer must deploy.
 Missing permissions, index gaps and failed APIs are not a pass.
 Microsoft Learn/portal hyperlinks are optional reference/navigation links, not
@@ -92,7 +93,7 @@ cannot support these footer actions.
 | Stage | Reports and outcome |
 | --- | --- |
 | **Start here** | Scope, permissions, workflow map, evidence limitations and expected outputs |
-| **1. Inventory** | Fleet overview; Retirement & pricing; Workloads & owners; Catalogue coverage. Produce a scoped workload list with owners and explicit unassessed SKUs |
+| **1. Inventory** | Fleet overview; Retirement & pricing; Reservation exposure; Workloads & owners; Catalogue coverage. Produce a scoped workload list, visible purchased reservation exposure and explicit unassessed SKUs |
 | **2. Assess** | V5 / V6 / V7 paths; Routes & gates; Required actions; SQL opportunities. Produce candidate paths and a prerequisite/evidence backlog |
 | **3. Plan** | Live target availability; Capacity & quota; Target specifications; Compatible alternatives; Suggested waves. Produce target-access and quota actions, pilots, dependency-aware waves and a recovery plan |
 | **4. Migrate & validate** | Route-specific runbook guidance and workload-specific done criteria, plus pilot, backup/restore, rollback, application/performance/HA checks and source closeout |
@@ -105,6 +106,37 @@ resources do not prove absence, successful migration or application readiness.
 The detailed report descriptions below retain their familiar names.
 
 ### Platform score, commercial signals and assessment layout
+
+#### Purchased reservations
+
+**Inventory > Reservation exposure** lists actual purchased VM reservation records,
+including reservations with no currently deployed matching VM. This is separate
+from Fleet overview's **series commercial signals**, which are not purchase records.
+
+The default shows retiring/EOL sizes, series RI purchase/renewal cutoffs, captured
+series/regional pricing signals and **unassessed SKUs requiring manual review**.
+Choose **All visible VM reservations** to inspect other VM reservations. Expired,
+cancelled and archived records remain visible when returned by the API; inspect
+state and expiry rather than treating historical records as active financial exposure.
+Columns show reservation name, reserved SKU, region, quantity, actual expiry,
+state and exposure. **Details** includes term, auto-renew, applied scope,
+purchase date, reservation ID and each captured lifecycle/commercial signal.
+This is not a utilization report, monetary loss estimate or attribution of RI
+benefits to individual VMs; size flexibility and shared scope require billing review.
+
+The native read-only Reservations API is **current-tenant and access-limited**,
+not filtered by the workbook's VM subscription or lifecycle selection. Subscription
+Reader alone does not establish reservation visibility. See
+[reservation permissions](https://learn.microsoft.com/azure/cost-management-billing/reservations/view-reservations).
+**No records is not proof no reservations exist.** The coverage table distinguishes
+missing/malformed responses, empty pages and continuation. Browse **Next reservation
+page** through the API's returned continuation links, including pages with zero
+impacted matches. **Return to first reservation page** restarts browsing. Each page
+requests 100 records; results are not silently presented as a tenant-wide total.
+Failed or unsupported continuation stays explicit. No collector, custom table,
+reservation purchase or reservation modification is required.
+
+#### Platform and series signals
 
 Inventory includes an on-page score/penalty key and all four score bands:
 **85-100 Few**, **60-84 Moderate**, **35-59 Substantial**, **0-34 Major scored
@@ -658,13 +690,13 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # all 33 live ARG queries in the current CLI subscription
+python scripts/validate_queries.py    # all 35 live ARG queries in the current CLI subscription
 # Optional quota scope / migration approach (CLI authorization scope remains --subscription):
 # python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace --quota-generation 6
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 64 offline tests, all 33 live ARG queries plus 12 V5/V6/V7 quota-scenario
+scope: 72 offline tests, all 35 live ARG queries plus 12 V5/V6/V7 quota-scenario
 queries, standalone-dependency regression checks, 24 quota and pricing/SQL boundary
 fixtures, workload-discovery fixtures and exact live target-SKU records. Additional
 ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,
@@ -738,7 +770,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 33 ARG queries while keeping the saved workbook below
+628-size catalogue and all 35 ARG queries while keeping the saved workbook below
 1 MB. Standalone workbook files are emitted compactly; both raw-file and saved-resource
 sizes are validated. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
@@ -789,7 +821,8 @@ update; and the Reserved Instance purchase and renewal end date of 1 July 2026
 ([Azure update 560948](https://azure.microsoft.com/updates?id=560948)).
 
 That is a **series-wide purchase/renewal cutoff**, not a customer's reservation
-expiry. The workbook does not read reservation terms, matching coverage, other
+expiry. Inventory > Reservation exposure reads visible reservation terms separately;
+the workbook does not calculate matching benefit coverage, other
 discounts or billing, and does not infer that a VM now bills at pay-as-you-go rates.
 
 For the **legacy-series update**, deliberately excluded: the rate-change percentage. That increase is scoped by
