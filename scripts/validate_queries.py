@@ -150,12 +150,14 @@ def structure_check(wb):
             if isinstance(c, dict) and c.get("queryType") == 12:
                 request = json.loads(c["query"])
                 if request.get("method") != "GETARRAY" or request.get("version") != "ARMEndpoint/1.0":
-                    problems.append(f"{node.get('name')}: live eligibility must be a read-only ARM array request")
-                if request.get("path") != (
-                    "/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus"
-                    "?api-version=2021-07-01&$filter=location eq '{LiveRegion}'"
-                ):
-                    problems.append(f"{node.get('name')}: unexpected live eligibility endpoint/scope")
+                    problems.append(f"{node.get('name')}: live inspection must be a read-only ARM array request")
+                endpoints = {
+                    "eligibility-live": "/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus"
+                                        "?api-version=2021-07-01&$filter=location eq '{LiveRegion}'",
+                    "discovery-batch-live": "{BatchAccountId}/pools?api-version=2024-07-01",
+                }
+                if node.get("name") not in endpoints or request.get("path") != endpoints[node["name"]]:
+                    problems.append(f"{node.get('name')}: unexpected live inspection endpoint/scope")
             if isinstance(c, dict) and c.get("queryType") == 1:
                 expected = ["{QuotaAllSubscriptions}"] if node.get("name", "").startswith("quota-") else ["{Subscriptions}"]
                 if c.get("crossComponentResources") != expected:

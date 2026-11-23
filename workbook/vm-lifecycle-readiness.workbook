@@ -1140,6 +1140,20 @@
                         "isRequired": true,
                         "value": "All",
                         "jsonData": "[{\"value\": \"All\", \"label\": \"All\"}, {\"value\": \"AKS\", \"label\": \"AKS\"}, {\"value\": \"Databricks\", \"label\": \"Databricks\"}, {\"value\": \"AVD\", \"label\": \"AVD\"}, {\"value\": \"SQL\", \"label\": \"SQL\"}, {\"value\": \"SAP\", \"label\": \"SAP\"}, {\"value\": \"Batch\", \"label\": \"Batch\"}, {\"value\": \"ARO\", \"label\": \"ARO\"}, {\"value\": \"Managed\", \"label\": \"Managed\"}, {\"value\": \"Unclassified\", \"label\": \"Unclassified\"}]"
+                      },
+                      {
+                        "version": "KqlParameterItem/1.0",
+                        "name": "BatchAccountId",
+                        "type": 1,
+                        "value": "",
+                        "isHiddenWhenLocked": true
+                      },
+                      {
+                        "version": "KqlParameterItem/1.0",
+                        "name": "BatchSelectedWorkload",
+                        "type": 1,
+                        "value": "",
+                        "isHiddenWhenLocked": true
                       }
                     ]
                   }
@@ -1147,7 +1161,7 @@
                 {
                   "type": 1,
                   "content": {
-                    "json": "## Workload ownership and observed evidence\n\nIdentify the owning service before choosing a resize or rebuild workflow. **No application complexity or migration approval is inferred from a platform score.** Owner associations, SQL registrations and SAP hints are discovery evidence, not proof of running software, healthy HA, stateless nodes or vendor certification. Use the table filter for resource groups and individual resources; export for full evidence.\n\n**Why Batch may be absent from the VM ownership grid:** it only contains VM/VMSS resources visible in the selected subscriptions. In **Batch service allocation mode**, pool VMs run in Microsoft-managed subscriptions, not your Compute inventory. Their ownership and migration method are shown in the **Service-owned pool configurations** table immediately below; an absent VM row does not mean Batch is unowned or undiscovered.\n\nThe compute detail includes Flexible members and scale-set models: **do not sum these rows for fleet capacity**. The quota and coverage inventories count models once. Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace plans are rebuild dependencies, not blanket resize blockers.\n\nOS hints use a deliberately limited subset of the official NVMe/MANA lists, checked 18 November 2026. Other distributions/versions remain **Review**, not unsupported. Guest metadata takes precedence over old image labels; neither proves driver or boot readiness. Windows Server 2019 shared-disk NVMe compatibility needs separate review."
+                    "json": "## Workload ownership and observed evidence\n\nIdentify the owning service before choosing a resize or rebuild workflow. **No application complexity or migration approval is inferred from a platform score.** Owner associations, SQL registrations and SAP hints are discovery evidence, not proof of running software, healthy HA, stateless nodes or vendor certification. Use the table filter for resource groups and individual resources; export for full evidence.\n\n**Why Batch may be absent from the VM ownership grid:** it only contains VM/VMSS resources visible in the selected subscriptions. In **Batch service allocation mode**, pool VMs run in Microsoft-managed subscriptions, not your Compute inventory. Use **Service-owned pool configurations** below and **Live Batch pools (ARM)**. An absent VM row does not mean Batch is unowned or undiscovered.\n\nThe compute detail includes Flexible members and scale-set models: **do not sum these rows for fleet capacity**. The quota and coverage inventories count models once. Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace plans are rebuild dependencies, not blanket resize blockers.\n\nOS hints use a deliberately limited subset of the official NVMe/MANA lists, checked 18 November 2026. Other distributions/versions remain **Review**, not unsupported. Guest metadata takes precedence over old image labels; neither proves driver or boot readiness. Windows Server 2019 shared-disk NVMe compatibility needs separate review."
                   },
                   "name": "discovery-intro",
                   "styleSettings": {
@@ -1258,7 +1272,7 @@
                 {
                   "type": 1,
                   "content": {
-                    "json": "### Service-owned pool configurations\n\nThis is the ownership view for **Batch service-mode compute**, including pools with zero nodes. Each Batch pool belongs to its Batch account; use the **Batch pool/task migration workflow**, not a direct VM resize. AKS pools are also shown as service-owned configuration. These are **pool records, not additional VM/VMSS rows**; do not add them to fleet totals or subscription Compute quota demand.\n\nConfigured sizes and lifecycle classifications remain relevant when nodes are stopped. **Autoscaler maxima, surge and Batch demand are not automatically added to the existing Compute quota plan**; validate service-specific quotas and peak capacity separately. Empty/missing pool profiles do not prove that the service has no nodes."
+                    "json": "### Service-owned pool configurations\n\nThis is the ownership view for **Batch service-mode compute**, including pools with zero nodes. Each Batch pool belongs to its Batch account; use the **Batch pool/task migration workflow**, not a direct VM resize. AKS pools are also shown as service-owned configuration. These are **pool records, not additional VM/VMSS rows**; do not add them to fleet totals or subscription Compute quota demand.\n\nConfigured sizes and lifecycle classifications remain relevant when nodes are stopped. **Autoscaler maxima, surge and Batch demand are not automatically added to the existing Compute quota plan**; validate service-specific quotas and peak capacity separately. **Resource Graph may omit Batch pools even when ARM lists them.** Empty/missing pool profiles do not prove that the service has no nodes. Select a Batch account in **Independent service registrations** to inspect its pools directly through ARM below."
                   },
                   "name": "discovery-pool-intro",
                   "styleSettings": {
@@ -1340,7 +1354,7 @@
                     ],
                     "visualization": "table",
                     "noDataMessage": "No matching rows in the selected scope and filters. Check subscription access, filters and catalogue coverage; an empty result is not migration approval.",
-                    "title": "Services, including registrations without visible backing compute",
+                    "title": "Services, including registrations without visible backing compute (select a Batch account for live pools)",
                     "gridSettings": {
                       "formatters": [
                         {
@@ -1373,9 +1387,78 @@
                       "filter": true
                     },
                     "showExportToExcel": true,
-                    "exportToExcelOptions": "all"
+                    "exportToExcelOptions": "all",
+                    "exportedParameters": [
+                      {
+                        "fieldName": "ResourceId",
+                        "parameterName": "BatchAccountId",
+                        "parameterType": 1
+                      },
+                      {
+                        "fieldName": "Workload",
+                        "parameterName": "BatchSelectedWorkload",
+                        "parameterType": 1
+                      }
+                    ]
                   },
                   "name": "discovery-services"
+                },
+                {
+                  "type": 1,
+                  "content": {
+                    "json": "### Live Batch pools (ARM)\n\n**Select a Batch account row above** to read its pool configurations directly from Azure Resource Manager, independently of Resource Graph pool indexing. This read-only inspection requires pool read permission. Empty output or an API error is **not proof of zero pools**; check the selected account and permissions.\n\nUse the **Batch pool/task migration workflow**, not a direct VM resize. These records are not additional subscription VMs and are not additive to fleet totals. Dedicated and Spot counts show current and fixed-scale targets; blank targets can indicate autoscaling, whose formula is shown separately. Configured sizes are evidence, not migration eligibility; this direct inspection does not apply the ARG lifecycle map."
+                  },
+                  "name": "discovery-batch-live-intro",
+                  "styleSettings": {
+                    "margin": "0",
+                    "padding": "0"
+                  }
+                },
+                {
+                  "type": 3,
+                  "name": "discovery-batch-live",
+                  "conditionalVisibility": {
+                    "parameterName": "BatchSelectedWorkload",
+                    "comparison": "isEqualTo",
+                    "value": "Batch"
+                  },
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "queryType": 12,
+                    "query": "{\"version\": \"ARMEndpoint/1.0\", \"method\": \"GETARRAY\", \"data\": null, \"headers\": [], \"path\": \"{BatchAccountId}/pools?api-version=2024-07-01\", \"urlParams\": [], \"batchDisabled\": false, \"transformers\": [{\"type\": \"jsonpath\", \"settings\": {\"tablePath\": \"$\", \"columns\": [{\"path\": \"$.name\", \"columnid\": \"Pool\"}, {\"path\": \"$.properties.vmSize\", \"columnid\": \"VmSize\"}, {\"path\": \"$.properties.currentDedicatedNodes\", \"columnid\": \"DedicatedNow\"}, {\"path\": \"$.properties.currentLowPriorityNodes\", \"columnid\": \"SpotNow\"}, {\"path\": \"$.properties.scaleSettings.fixedScale.targetDedicatedNodes\", \"columnid\": \"DedicatedTarget\"}, {\"path\": \"$.properties.scaleSettings.fixedScale.targetLowPriorityNodes\", \"columnid\": \"SpotTarget\"}, {\"path\": \"$.properties.scaleSettings.autoScale.formula\", \"columnid\": \"Autoscale\"}]}}]}",
+                    "title": "Live Batch pools (ARM) - {BatchAccountId}",
+                    "size": 1,
+                    "visualization": "table",
+                    "showExportToExcel": true,
+                    "noDataMessage": "Unknown: no pool rows returned. Check account selection, permissions and the ARM request; do not infer zero pools.",
+                    "gridSettings": {
+                      "formatters": [
+                        {
+                          "columnMatch": "Pool",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "22ch"
+                          }
+                        },
+                        {
+                          "columnMatch": "VmSize",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "22ch"
+                          }
+                        },
+                        {
+                          "columnMatch": "Autoscale",
+                          "formatter": 0,
+                          "formatOptions": {
+                            "customColumnWidthSetting": "40ch"
+                          }
+                        }
+                      ],
+                      "rowLimit": 10,
+                      "filter": true
+                    }
+                  }
                 }
               ]
             },

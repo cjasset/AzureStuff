@@ -1491,7 +1491,32 @@ def discovery_items():
             "label": "Workload signal", "type": 2, "isRequired": True, "value": "All",
             "jsonData": json.dumps([{"value": value, "label": value} for value in (
                 "All", "AKS", "Databricks", "AVD", "SQL", "SAP", "Batch",
-                "ARO", "Managed", "Unclassified")])}]}}
+                "ARO", "Managed", "Unclassified")])}]
+        + [{"version": "KqlParameterItem/1.0", "name": name, "type": 1,
+            "value": "", "isHiddenWhenLocked": True}
+           for name in ("BatchAccountId", "BatchSelectedWorkload")]}}
+    services = arg_query(
+        service_inventory_query(), "discovery-services", size=1, export=True,
+        title="Services, including registrations without visible backing compute (select a Batch account for live pools)",
+        grid=grid_settings({"Name": "28ch", "Workload": "18ch", "ResourceGroup": "24ch"},
+                           [fmt("ResourceId", 5)], filter=True))
+    services["content"]["exportedParameters"] = [
+        {"fieldName": field, "parameterName": parameter, "parameterType": 1}
+        for field, parameter in (("ResourceId", "BatchAccountId"), ("Workload", "BatchSelectedWorkload"))]
+    batch_request = {
+        "version": "ARMEndpoint/1.0", "method": "GETARRAY", "data": None, "headers": [],
+        "path": "{BatchAccountId}/pools?api-version=2024-07-01",
+        "urlParams": [], "batchDisabled": False,
+        "transformers": [{"type": "jsonpath", "settings": {
+            "tablePath": "$", "columns": [
+                {"path": path, "columnid": column} for column, path in (
+                    ("Pool", "$.name"), ("VmSize", "$.properties.vmSize"),
+                    ("DedicatedNow", "$.properties.currentDedicatedNodes"),
+                    ("SpotNow", "$.properties.currentLowPriorityNodes"),
+                    ("DedicatedTarget", "$.properties.scaleSettings.fixedScale.targetDedicatedNodes"),
+                    ("SpotTarget", "$.properties.scaleSettings.fixedScale.targetLowPriorityNodes"),
+                    ("Autoscale", "$.properties.scaleSettings.autoScale.formula"))]}}],
+    }
     return [
         parameters,
         text_item(
@@ -1504,8 +1529,8 @@ def discovery_items():
             "**Why Batch may be absent from the VM ownership grid:** it only contains VM/VMSS "
             "resources visible in the selected subscriptions. In **Batch service allocation mode**, "
             "pool VMs run in Microsoft-managed subscriptions, not your Compute inventory. "
-            "Their ownership and migration method are shown in the **Service-owned pool configurations** "
-            "table immediately below; an absent VM row does not mean Batch is unowned or undiscovered.\n\n"
+            "Use **Service-owned pool configurations** below and **Live Batch pools (ARM)**. "
+            "An absent VM row does not mean Batch is unowned or undiscovered.\n\n"
             "The compute detail includes Flexible members and scale-set models: **do not sum "
             "these rows for fleet capacity**. The quota and coverage inventories count models once. "
             "Missing NIC/disk visibility is Unknown, not a passed check. Identity and Marketplace "
@@ -1534,7 +1559,9 @@ def discovery_items():
             "Configured sizes and lifecycle classifications remain relevant when nodes are stopped. "
             "**Autoscaler maxima, surge and Batch demand are not automatically added to the existing "
             "Compute quota plan**; validate service-specific quotas and peak capacity separately. "
-            "Empty/missing pool profiles do not prove that the service has no nodes.",
+            "**Resource Graph may omit Batch pools even when ARM lists them.** Empty/missing pool "
+            "profiles do not prove that the service has no nodes. Select a Batch account in "
+            "**Independent service registrations** to inspect its pools directly through ARM below.",
             "discovery-pool-intro"),
         arg_query(configured_pools_query(), "discovery-pools", size=1, export=True,
                   title="Service-owned AKS / Batch pools, lifecycle and migration method (not VM inventory)",
@@ -1547,10 +1574,27 @@ def discovery_items():
             "AVD host-pool type is shown here; SQL groups do not prove active Always On membership. "
             "Serverless/terminated Databricks compute and guest application roles are not enumerated.",
             "discovery-service-intro"),
-        arg_query(service_inventory_query(), "discovery-services", size=1, export=True,
-                  title="Services, including registrations without visible backing compute",
-                  grid=grid_settings({"Name": "28ch", "Workload": "18ch", "ResourceGroup": "24ch"},
-                                     [fmt("ResourceId", 5)], filter=True)),
+        services,
+        text_item(
+            "### Live Batch pools (ARM)\n\n"
+            "**Select a Batch account row above** to read its pool configurations directly from "
+            "Azure Resource Manager, independently of Resource Graph pool indexing. This read-only "
+            "inspection requires pool read permission. Empty output or an API error is **not proof "
+            "of zero pools**; check the selected account and permissions.\n\n"
+            "Use the **Batch pool/task migration workflow**, not a direct VM resize. These records "
+            "are not additional subscription VMs and are not additive to fleet totals. Dedicated "
+            "and Spot counts show current and fixed-scale targets; blank targets can indicate "
+            "autoscaling, whose formula is shown separately. Configured sizes are evidence, not "
+            "migration eligibility; this direct inspection does not apply the ARG lifecycle map.",
+            "discovery-batch-live-intro"),
+        {"type": 3, "name": "discovery-batch-live", "conditionalVisibility": {
+            "parameterName": "BatchSelectedWorkload", "comparison": "isEqualTo", "value": "Batch"},
+         "content": {"version": "KqlItem/1.0", "queryType": 12, "query": json.dumps(batch_request),
+                     "title": "Live Batch pools (ARM) - {BatchAccountId}",
+                     "size": 1, "visualization": "table", "showExportToExcel": True,
+                     "noDataMessage": "Unknown: no pool rows returned. Check account selection, permissions and the ARM request; do not infer zero pools.",
+                     "gridSettings": grid_settings(
+                         {"Pool": "22ch", "VmSize": "22ch", "Autoscale": "40ch"}, [], filter=True)}},
     ]
 
 

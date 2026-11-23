@@ -117,8 +117,14 @@ The ownership view separates observed subscription VM/VMSS rows from
 **Service-owned pool configurations**, shown immediately underneath. In Batch
 service allocation mode, pool VMs are in Microsoft-managed subscriptions and
 cannot appear as local Compute ownership rows. Batch ownership, configured
-sizes, lifecycle and pool/task migration guidance remain visible in the pool
-table, including at zero nodes; these records are not additional fleet VMs.
+sizes, lifecycle and pool/task migration guidance are shown in the pool
+table when Resource Graph indexes the pools, including at zero nodes; these
+records are not additional fleet VMs. Resource Graph can omit existing Batch
+pools. Select a Batch account in **Independent service registrations** to open
+**Live Batch pools (ARM)**, a direct read-only pool listing independent of ARG
+indexing. It shows configured sizes, dedicated/Spot counts and autoscaling
+formulas; it does not apply the ARG lifecycle map. Empty results or API errors
+are not proof of zero pools; check selection and pool-read permissions.
 AVD host-pool type and configured AKS/Batch pool demand are exposed. Autoscaler
 maxima, surge, Batch service quotas and transient/serverless compute are **not**
 automatically incorporated into the existing Compute VM/VMSS quota calculation.

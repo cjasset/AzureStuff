@@ -228,6 +228,21 @@ class WorkbookDeploymentTests(unittest.TestCase):
         pool_intro = find_item(self.workbook, "discovery-pool-intro")["content"]["json"]
         self.assertIn("not additional VM/VMSS rows", pool_intro)
         self.assertIn("zero nodes", pool_intro)
+        self.assertIn("Resource Graph may omit Batch pools", pool_intro)
+        services = find_item(self.workbook, "discovery-services")["content"]
+        self.assertEqual(services["exportedParameters"], [
+            {"fieldName": "ResourceId", "parameterName": "BatchAccountId", "parameterType": 1},
+            {"fieldName": "Workload", "parameterName": "BatchSelectedWorkload", "parameterType": 1}])
+        live = find_item(self.workbook, "discovery-batch-live")
+        self.assertEqual(live["conditionalVisibility"], {
+            "parameterName": "BatchSelectedWorkload", "comparison": "isEqualTo", "value": "Batch"})
+        request = json.loads(live["content"]["query"])
+        self.assertEqual(request["method"], "GETARRAY")
+        self.assertEqual(request["path"], "{BatchAccountId}/pools?api-version=2024-07-01")
+        self.assertTrue(live["content"]["noDataMessage"].startswith("Unknown:"))
+        columns = request["transformers"][0]["settings"]["columns"]
+        self.assertEqual({column["columnid"] for column in columns}, {
+            "Pool", "VmSize", "DedicatedNow", "SpotNow", "DedicatedTarget", "SpotTarget", "Autoscale"})
 
     def test_structure_is_valid(self):
         self.assertEqual(structure_check(self.workbook), [])
@@ -438,7 +453,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in result],
                          ["eligibility-live", "eligibility-record-parameter", "eligibility-status"])
         arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
-        self.assertEqual(len(arms), 1)
+        self.assertEqual({item["name"] for item in arms}, {"eligibility-live", "discovery-batch-live"})
 
     def test_access_summary_has_red_green_unknown_and_raw_is_opt_in(self):
         content = find_item(self.workbook, "eligibility-status")["content"]
