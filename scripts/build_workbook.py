@@ -26,6 +26,8 @@ from workload_evidence import (compute_evidence_query, configured_pools_query,
                                sql_evidence_query)
 from reservation_evidence import (FIRST_PAGE, coverage_query as reservation_coverage_query,
                                   inventory_query as reservation_inventory_query)
+from quota_group_evidence import (arm_request as group_arm_request,
+                                  evidence_query as group_evidence_query, merge_parameter)
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -853,7 +855,7 @@ def quota_status_formatter(column):
     ]})
 
 
-def quota_planning_items(base):
+def quota_planning_items(base, regions, families):
     demand = arg_query(quota_demand_query(base), "quota-demand", export=True, size=1,
                        title="Migration breakdown: subscription, region and target family",
                        grid=grid_settings(
@@ -904,6 +906,7 @@ def quota_planning_items(base):
             ("QuotaDetails", "Show detail", "none",
              [("none", "Summary only"), ("migration", "Migration breakdown"),
               ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion"),
+              ("groups", "Live quota-group inspector"),
               ("key", "Column key & assumptions")]),
             ("QuotaGeneration", "Target scenario", "default",
              [("default", "Default V5-first"), ("5", "V5 only"), ("6", "V6 only"), ("7", "V7 only")]),
@@ -932,6 +935,10 @@ def quota_planning_items(base):
             "version": "KqlParameterItem/1.0", "style": "pills",
             "parameters": [dict(p, version="KqlParameterItem/1.0") for p in parameters]}},
         summary, demand, checks, headroom,
+        {"type": 12, "name": "quota-group-inspector",
+         "conditionalVisibility": {"parameterName": "QuotaDetails", "comparison": "isEqualTo", "value": "groups"},
+         "content": {"version": "NotebookGroup/1.0", "groupType": "editable",
+                     "items": quota_group_items(regions, families)}},
         conditional_text("quota-key", "QuotaDetails", "key",
             "### Column key & assumptions\n\n"
             "A compact total plus one row per subscription. Change **Planning scope** to compare selected "
@@ -956,7 +963,9 @@ def quota_planning_items(base):
             "**Tenant headroom** shows unused quota now in readable subscriptions for relevant regions/families, "
             "capped by regional headroom. It is not surplus after their planned migrations or a shared pool: "
             "verify quota-group membership, eligibility, limits and approvals before any reallocation. "
-            "This workbook neither inspects quota-group eligibility nor moves quota.\n\n"
+            "The separate **Live quota-group inspector** checks one selected management group, quota group, "
+            "subscription, region and metric. It does not certify tenant-wide membership, donor eligibility "
+            "or transferability, and never moves quota.\n\n"
             "**Quota is not physical capacity.** SKU/zone restrictions, policy, boot/driver compatibility "
             "and actual allocation still require validation. Targets use captured SKU `vCPUs`, not constrained "
             "`vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand. "
@@ -965,6 +974,86 @@ def quota_planning_items(base):
             "For request procedures, see [VM vCPU quotas]"
             "(https://learn.microsoft.com/azure/quotas/per-vm-quota-requests)."),
     ]
+
+
+def quota_group_items(regions, families):
+    parameters = []
+    for name, label in (("QuotaGroupManagementGroup", "Readable management group"),
+                        ("QuotaGroupId", "Quota group")):
+        parameters.append({
+            "version": "KqlParameterItem/1.0", "name": name, "label": label,
+            "type": 2, "isRequired": True, "queryType": 12,
+            "query": group_arm_request(name, [("value", "$.id"), ("label", "$.name")], "$.value[*]"),
+            "typeSettings": {"showDefault": False},
+        })
+    parameters.append({
+        "version": "KqlParameterItem/1.0", "name": "QuotaGroupSubscription", "type": 6,
+        "label": "Subscription to inspect", "isRequired": True,
+        "typeSettings": {"additionalResourceOptions": ["value::1"], "showDefault": False},
+        "value": "value::1",
+    })
+    for name, label, values in (
+            ("QuotaGroupRegion", "Region to inspect", sorted(regions)),
+            ("QuotaGroupMetric", "Quota metric to inspect", ["cores"] + sorted(set(families.values())))):
+        parameters.append({
+            "version": "KqlParameterItem/1.0", "name": name, "label": label, "type": 2,
+            "isRequired": True, "jsonData": json.dumps(
+                [{"value": v, "label": v} for v in values], separators=(",", ":")),
+            "value": values[0],
+        })
+    parameters.append({
+        "version": "KqlParameterItem/1.0", "name": "QuotaGroupEvidence", "label": "Evidence detail",
+        "type": 2, "isRequired": True, "value": "summary",
+        "jsonData": json.dumps([{"value": "summary", "label": "Summary"},
+                                {"value": "raw", "label": "Summary + raw API evidence"}]),
+    })
+    items = [
+        text_item(
+            "### Live quota-group inspector\n\n"
+            "Choose a management group, quota group, subscription, region and metric. "
+            "Discovery lists follow standard API pages automatically. "
+            "**One selected scope, not a tenant-wide scan**; independent of fleet filters/scenarios. "
+            "Empty lists/API errors do not prove no group exists.\n\n"
+            "Membership is read from the quota-group API, **not inferred from management-group ancestry**. "
+            "An unallocated pool is not subscription headroom: allocate it first, then refresh both family "
+            "and regional subscription checks. Already allocated quota is not added again. "
+            "Pool/allocation continuation pages remain Unknown; inspect Azure Quotas for full coverage. "
+            "Donor shareable quota, subscription eligibility and physical capacity are not assessed. "
+            "No group, membership or quota is changed. "
+            "[Quota-group guidance](https://learn.microsoft.com/azure/quotas/quota-groups).",
+            "group-quota-intro"),
+        {"type": 9, "name": "group-quota-controls", "content": {
+            "version": "KqlParameterItem/1.0", "style": "pills", "parameters": parameters}},
+    ]
+    for name, parameter in (("group-quota-membership", "QuotaGroupMemberRecord"),
+                            ("group-quota-pool", "QuotaGroupPoolRecord")):
+        items.append({
+            "type": 3, "name": name, "content": {
+                "version": "KqlItem/1.0", "queryType": 12,
+                "query": group_arm_request(name, [("Record", "$")]),
+                "title": "Live membership evidence" if name.endswith("membership") else "Live regional group-pool evidence",
+                "size": 3, "visualization": "table",
+                "gridSettings": grid_settings({"Record": "100%"}),
+                "noDataMessage": "Unknown: no API evidence. Check permissions, selected scope and API errors.",
+            },
+            "conditionalVisibility": {"parameterName": "QuotaGroupEvidence", "comparison": "isEqualTo", "value": "raw"},
+        })
+        items.append({"type": 9, "name": name + "-record", "content": {
+            "version": "KqlParameterItem/1.0",
+            "parameters": [merge_parameter(parameter, name, "Record")]}})
+    items.append(arg_query(
+        group_evidence_query(), "group-quota-evidence", size=1, export=True,
+        title="Quota-group evidence - separate from subscription quota checks",
+        grid=grid_settings(
+            {"Subscription": "30ch", "Region": "15ch", "Metric": "25ch", "Membership": "24ch",
+             "Group quota evidence": "34ch", "Group limit": "12ch", "Unallocated group cores": "16ch",
+             "Already allocated to subscription": "20ch", "Next action": "45ch"},
+            [fmt("Group quota evidence", 18, formatOptions={
+                "thresholdsOptions": "colors", "thresholdsGrid": [
+                    {"operator": "contains", "thresholdValue": "Unknown", "representation": "orange", "text": "{0}{1}"},
+                    {"operator": "Default", "representation": "blue", "text": "{0}{1}"}]})]
+            + [fmt(c, 5) for c in ("ManagementGroupAndQuotaGroup", "CheckedAtUtc")])))
+    return items
 
 
 # --------------------------------------------------------------------------
@@ -1971,19 +2060,6 @@ def eligibility_items(base):
 
 
 def reservation_items():
-    def merge_parameter(name, table, column):
-        merge_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{name}:{table}:{column}"))
-        return {
-            "version": "KqlParameterItem/1.0", "name": name, "type": 1,
-            "isHiddenWhenLocked": True, "value": "", "queryType": 7,
-            "query": json.dumps({
-                "version": "Merge/1.0",
-                "merges": [{"id": merge_id, "mergeType": "table", "leftTable": table}],
-                "projectRename": [{"originalName": f"[{table}].{column}",
-                                   "mergedName": column, "fromId": merge_id}],
-            }),
-        }
-
     raw = {
         "type": 3, "name": "reservation-live", "conditionalVisibility": {
             "parameterName": "ReservationEvidence", "comparison": "isEqualTo", "value": "raw"},
@@ -2264,7 +2340,8 @@ def build(data):
     items.append(group_item("grp-availability", "availability", eligibility_items(base_query(
         sku_map, tgt_regions, region_ids, include_optional=False, use_lookup_parameters=True,
         include_placement_zones=True))))
-    items.append(group_item("grp-quota", "quota", quota_planning_items(base)))
+    items.append(group_item("grp-quota", "quota", quota_planning_items(
+        base, region_ids, quota_metadata["families"])))
 
     # ---------------- TAB 1: Overview ----------------
     ov = []

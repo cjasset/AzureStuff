@@ -203,10 +203,12 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 35)
+        self.assertEqual(len(queries), 36)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
-            if name.startswith("reservation-"):
+            if name == "group-quota-evidence":
+                self.assertEqual(query, builder.group_evidence_query())
+            elif name.startswith("reservation-"):
                 self.assertIn("{ReservationPageRecord:json}", query)
                 self.assertNotIn("resources\n", query)
             elif name == "eligibility-status":
@@ -512,7 +514,8 @@ class WorkbookDeploymentTests(unittest.TestCase):
                          ["eligibility-fit-intro", "eligibility-fit"])
         arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
         self.assertEqual({item["name"] for item in arms},
-                         {"eligibility-live", "discovery-batch-live", "reservation-live"})
+                         {"eligibility-live", "discovery-batch-live", "reservation-live",
+                          "group-quota-membership", "group-quota-pool"})
 
     def test_access_summary_has_red_green_unknown_and_raw_is_opt_in(self):
         content = find_item(self.workbook, "eligibility-status")["content"]

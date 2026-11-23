@@ -12,6 +12,7 @@ import time
 
 from build_workbook import LOOKUP_PARAMETERS, WORKBOOK_SIZE_LIMIT, expand_lookups, lookup_values
 from reservation_evidence import FIRST_PAGE
+from quota_group_evidence import ENDPOINTS as GROUP_ENDPOINTS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(os.path.dirname(HERE), "out")
@@ -32,6 +33,12 @@ SUBSTITUTIONS = {
     "{LiveTarget}": "",
     "{ReservationPageRecord:json}": "{}",
     "{ReservationView}": "affected",
+    "{QuotaGroupMemberRecord:json}": "{}",
+    "{QuotaGroupPoolRecord:json}": "{}",
+    "{QuotaGroupId:json}": '""',
+    "{QuotaGroupSubscription:json}": '""',
+    "{QuotaGroupRegion:json}": '""',
+    "{QuotaGroupMetric:json}": '""',
 }
 
 def azure_json(arguments):
@@ -189,7 +196,9 @@ def structure_check(wb):
             problems.append("ReservationPagePath must be global with the exact read-only first page")
         for parameter, table, column in (
                 ("ReservationPageRecord", "reservation-live", "Page"),
-                ("ReservationNextPagePath", "reservation-coverage", "NextPagePath")):
+                ("ReservationNextPagePath", "reservation-coverage", "NextPagePath"),
+                ("QuotaGroupMemberRecord", "group-quota-membership", "Record"),
+                ("QuotaGroupPoolRecord", "group-quota-pool", "Record")):
             record = declared.get(parameter, {})
             merge = json.loads(record.get("query", "{}"))
             if record.get("queryType") != 7 or not any(
@@ -226,9 +235,12 @@ def structure_check(wb):
     def check_scope(node):
         if isinstance(node, dict):
             c = node.get("content", {})
-            if isinstance(c, dict) and c.get("queryType") == 12:
-                request = json.loads(c["query"])
-                expected_method = "GET" if node.get("name") == "reservation-live" else "GETARRAY"
+            arm = c if isinstance(c, dict) and c.get("queryType") == 12 else node
+            if arm.get("queryType") == 12 and node.get("name"):
+                request = json.loads(arm["query"])
+                name = node.get("name")
+                expected_method = GROUP_ENDPOINTS[name][0] if name in GROUP_ENDPOINTS else (
+                    "GET" if name == "reservation-live" else "GETARRAY")
                 if request.get("method") != expected_method or request.get("version") != "ARMEndpoint/1.0":
                     problems.append(f"{node.get('name')}: live inspection must be a read-only ARM array request")
                 endpoints = {
@@ -236,9 +248,12 @@ def structure_check(wb):
                                         "?api-version=2021-07-01&$filter=location eq '{LiveRegion}'",
                     "discovery-batch-live": "{BatchAccountId}/pools?api-version=2024-07-01",
                     "reservation-live": "{ReservationPagePath}",
+                    **{name: endpoint[1] for name, endpoint in GROUP_ENDPOINTS.items()},
                 }
-                if node.get("name") not in endpoints or request.get("path") != endpoints[node["name"]]:
-                    problems.append(f"{node.get('name')}: unexpected live inspection endpoint/scope")
+                if name not in endpoints or request.get("path") != endpoints[name]:
+                    problems.append(f"{name}: unexpected live inspection endpoint/scope")
+                if request.get("data") is not None or request.get("headers"):
+                    problems.append(f"{name}: unexpected live inspection body/headers")
             if isinstance(c, dict) and c.get("queryType") == 1:
                 expected = ["{QuotaAllSubscriptions}"] if node.get("name", "").startswith("quota-") else ["{Subscriptions}"]
                 if c.get("crossComponentResources") != expected:
