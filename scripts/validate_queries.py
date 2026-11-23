@@ -21,6 +21,7 @@ SUBSTITUTIONS = {
     "{LifecycleFilter}": "RETIRE,EOL,OPTIONAL",
     "{QuotaScope}": "selected",
     "{QuotaMigrationMode}": "sidebyside",
+    "{QuotaGeneration}": "default",
     "{DiscoveryWorkload}": "All",
     "{EligibilityGeneration}": "5",
     "{LiveSkuRecord:json}": "{}",
@@ -69,9 +70,66 @@ def walk_items(items):
         yield from walk_items(item.get("content", {}).get("items", []))
 
 
+def self_containment_problems(workbook, template=None):
+    """Enforce the deployment/runtime dependency boundary, not documentation links."""
+    problems = []
+    item_names = {item["name"] for item in walk_items(workbook["items"])}
+
+    def inspect(node):
+        if isinstance(node, dict):
+            if "query" in node:
+                kind = node.get("queryType")
+                query = node["query"]
+                if kind not in (1, 7, 12):
+                    problems.append(f"self-contained: unsupported data source/query type {kind}")
+                if kind == 1 and node.get("resourceType") != "microsoft.resourcegraph/resources":
+                    problems.append("self-contained: only native ARG is allowed for KQL")
+                if re.search(r"\b(externaldata|workspace|app|cluster|database)\s*\(|"
+                             r"/providers/microsoft\.resourcegraph/queries/", query, re.I):
+                    problems.append("self-contained: external/shared query dependency")
+                if kind == 7:
+                    merge = json.loads(query)
+                    if merge.get("version") != "Merge/1.0" or not merge.get("merges"):
+                        problems.append("self-contained: only local workbook merges are allowed")
+                    for entry in merge.get("merges", []):
+                        for side in ("leftTable", "rightTable"):
+                            if side in entry and entry[side] not in item_names:
+                                problems.append("self-contained: merge references an external table")
+            for key, value in node.items():
+                if key.lower() in ("workspaceid", "workspaceresourceid", "storageuri", "templatelink"):
+                    problems.append(f"self-contained: supporting resource dependency {key}")
+                if isinstance(value, str) and "/providers/microsoft.operationalinsights/workspaces/" in value.lower():
+                    problems.append("self-contained: Log Analytics workspace dependency")
+                inspect(value)
+        elif isinstance(node, list):
+            for value in node:
+                inspect(value)
+    inspect(workbook)
+    for item in walk_items(workbook["items"]):
+        if item.get("type") == 1 and re.search(
+                r"!\[|<(?:script|iframe|img)\b|javascript:", item["content"]["json"], re.I):
+            problems.append("self-contained: remote/active content dependency")
+    for parameter in (p for item in workbook["items"] if item.get("type") == 9
+                      for p in item["content"].get("parameters", []) if p["name"] in LOOKUP_PARAMETERS):
+        if "query" in parameter or not parameter.get("value"):
+            problems.append("self-contained: reference lookups must be embedded values")
+    if template is not None:
+        resources = template.get("resources", [])
+        if len(resources) != 1 or resources[0].get("type", "").lower() != "microsoft.insights/workbooks":
+            problems.append("self-contained: deploy exactly one workbook resource")
+        else:
+            resource = resources[0]
+            if resource.get("dependsOn") or "resources" in resource:
+                problems.append("self-contained: workbook must have no resource prerequisites")
+            if resource.get("properties", {}).get("sourceId", "").lower() != "azure monitor":
+                problems.append("self-contained: workbook must not be bound to a supporting resource")
+            inspect(resource)
+    return problems
+
+
 def structure_check(wb):
     """Offline structural checks on the workbook JSON."""
-    problems = []
+    problems = self_containment_problems(wb)
     items = wb.get("items", [])
 
     all_items = list(walk_items(items))
@@ -194,6 +252,7 @@ def main():
     parser.add_argument("--subscription", help="Live query scope; defaults to the current CLI subscription.")
     parser.add_argument("--quota-scope", choices=("selected", "tenant"), default="selected")
     parser.add_argument("--migration-mode", choices=("sidebyside", "inplace"), default="sidebyside")
+    parser.add_argument("--quota-generation", choices=("default", "5", "6", "7"), default="default")
     parser.add_argument("--query", action="append", dest="query_names",
                         help="Validate only these named ARG queries; repeat for related queries.")
     args = parser.parse_args()
@@ -203,6 +262,7 @@ def main():
     root = os.path.dirname(HERE)
     with open(os.path.join(root, "workbook", "azuredeploy.json"), encoding="utf-8") as f:
         template = json.load(f)
+    problems.extend(self_containment_problems(wb, template))
     resource = template["resources"][0]
     with open(os.path.join(root, "workbook", "vm-lifecycle-readiness.workbook"),
               encoding="utf-8") as f:
@@ -213,11 +273,14 @@ def main():
         problems.append("ARM workbook version differs from the serialized workbook")
     if len(json.dumps(resource).encode("utf-8")) >= WORKBOOK_SIZE_LIMIT:
         problems.append("ARM workbook resource exceeds 1 MB")
+    for path in (WB, os.path.join(root, "workbook", "vm-lifecycle-readiness.workbook")):
+        if os.path.getsize(path) >= WORKBOOK_SIZE_LIMIT:
+            problems.append(f"standalone workbook file exceeds 1 MB: {os.path.basename(path)}")
     print("Structure and deployment artifact checks")
     for problem in problems:
         print(f"  FAIL  {problem}")
     if not problems:
-        print("  PASS  size limits, artifact parity, versions, tabs, parameters and query scoping")
+        print("  PASS  workbook-only dependencies, raw/saved size limits, artifact parity, navigation and query scoping")
     if args.offline or problems:
         return 1 if problems else 0
 
@@ -233,7 +296,8 @@ def main():
     subscription = args.subscription or azure_json(["account", "show"])["id"]
     substitutions = dict(SUBSTITUTIONS)
     substitutions.update({"{Subscriptions}": f"'{subscription}'", "{QuotaScope}": args.quota_scope,
-                          "{QuotaMigrationMode}": args.migration_mode})
+                          "{QuotaMigrationMode}": args.migration_mode,
+                          "{QuotaGeneration}": args.quota_generation})
     failures = 0
     for name, q in queries:
         q = expand_lookups(q, wb)

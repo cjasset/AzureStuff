@@ -13,6 +13,32 @@ guest drivers, application dependencies, HA, backup and rollback may still be un
 Modelled on the Azure Advisor *Service Retirement* workbook, but VM-specific and
 with target mapping plus readiness scoring that Advisor does not provide.
 
+## Self-contained deployment and runtime
+
+The template deploys **exactly one Azure Monitor workbook resource**. There is no
+Log Analytics workspace (LAW), customer-created table, storage account, Function,
+Automation account, backend, agent installation or ingestion pipeline to provision.
+Catalogue lookups, migration routes and checklists are embedded in the saved workbook.
+No community tools or external catalogue feeds run when customers open it.
+
+The workbook is **not offline**: customers need authenticated Azure control-plane
+access and read permissions for the subscriptions and resource types they inspect.
+It reads Azure's built-in Resource Graph tables (including `QuotaResources`,
+`AdvisorResources`, `BatchResources` and `DesktopVirtualizationResources`) and
+the existing read-only Compute SKU and Batch pool ARM endpoints. Those built-in
+tables are Azure-managed indexes, not tables the customer must deploy.
+Missing permissions, index gaps and failed APIs are not a pass.
+Microsoft Learn/portal hyperlinks are optional reference/navigation links, not
+runtime data feeds. GitHub hosts the initial deployment template; customers can
+also download/import the standalone workbook/template without ongoing GitHub access.
+
+`scripts/validate_queries.py --offline` and the regression suite enforce the
+one-resource deployment boundary, embedded reference values, permitted read-only
+API endpoints, ARG-only KQL and local workbook merges. LAW queries, remote
+lookups/shared queries, supporting resource dependencies and remote active
+content are rejected. Build-time Python and repository reference files are
+authoring dependencies only; customers do not install them to use the workbook.
+
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
 
 ## Fork policy: v5 first
@@ -27,7 +53,8 @@ The target specifications, memory-preserving target, regional lookup and readine
 warnings are derived from the selected target together. For example, DS1_v2 and
 D2s_v3 now recommend **D2ds_v5**, which retains local storage and supports Gen1/Gen2.
 They no longer inherit the Gen2-only/NVMe penalties of the original D2ads_v6 target.
-V6 remains an explicit alternative, requiring its own boot-controller validation.
+V6 and V7 have independently assessed paths where captured compatible candidates
+exist, requiring their own boot-controller and prerequisite validation.
 
 If no suitable v5 candidate exists in the captured catalogue, the newer target
 remains visible with **manual review required**. Existing non-NVMe recommendations
@@ -66,9 +93,9 @@ cannot support these footer actions.
 | --- | --- |
 | **Start here** | Scope, permissions, workflow map, evidence limitations and expected outputs |
 | **1. Inventory** | Fleet overview; Retirement & pricing; Workloads & owners; Catalogue coverage. Produce a scoped workload list with owners and explicit unassessed SKUs |
-| **2. Assess** | V5 / V6 paths and live SKU inspector; Required actions; SQL opportunities. Produce candidate paths and a prerequisite/evidence backlog |
-| **3. Plan** | Capacity & quota; Target specifications; Suggested waves. Produce quota actions, pilots, dependency-aware waves and a recovery plan |
-| **4. Migrate & validate** | Customer-operated execution and acceptance checklist: pilot, backup/restore, rollback, application/performance/HA checks and source closeout. Links to supported service-specific methods |
+| **2. Assess** | V5 / V6 / V7 paths and live SKU/capability inspector; Routes & gates; Required actions; SQL opportunities. Produce candidate paths and a prerequisite/evidence backlog |
+| **3. Plan** | Target-specific Capacity & quota scenarios; Target specifications; Compatible alternatives; Suggested waves. Produce quota actions, pilots, dependency-aware waves and a recovery plan |
+| **4. Migrate & validate** | Route-specific runbook guidance and workload-specific done criteria, plus pilot, backup/restore, rollback, application/performance/HA checks and source closeout |
 | **Methodology & references** | Recommendation policy, scoring model, sources and limitations; always accessible without advancing the workflow |
 
 This is **guidance, not an execution engine or completion tracker**. Maintain
@@ -90,13 +117,53 @@ The adjacent commercial key distinguishes legacy-series pricing, RI
 purchase/renewal cutoffs and separate regional exposure. None reads customer
 reservation expiry, current billing or negotiated rates.
 
-Assess stacks independent **full-width V5 and V6 panels**. Each compact grid has
+Assess stacks independent **full-width V5, V6 and V7 panels**. Each compact grid has
 eight visible columns; **ChecksNotMet** and **ChecksUnknown** count all 22 checks,
 not just the three directly displayed status columns. Select **All 22 checks** for
 the resource's vertically listed statuses and evidence in the native details view.
 Export retains every prerequisite as its own column. An on-page dictionary
 explains each prerequisite and the four states. Zero mismatches with unknown
 evidence is not approval.
+
+### Guided routes, gates and acceptance
+
+**Routes & gates** pairs observed ownership/encryption/appliance/placement evidence
+with five distinct guide selections: same-VM resize, parallel replacement,
+service-owned replacement, Gen1 to Trusted Launch and SCSI to NVMe. The last two
+are separate operations, not interchangeable names for a resize. Selections
+change session-local guidance only, not a VM's target, readiness or saved approval.
+
+The gates explain ADE's independent 15 September 2028 retirement, OS/data and
+Windows/Linux scope, new-disk/new-VM encryption-at-host migration, Linux OS
+decryption limits and persistent UDE history. They link the supported procedure
+rather than embedding risky disk-copy commands. Selected publisher matches are
+**suspected** network/storage/backup appliance evidence, not proof; generic
+Marketplace/custom images remain unclassified until product/version certification
+is confirmed. Placement details include zones, availability sets, Dedicated Host/
+host groups, PPGs and capacity reservations; absent associations are not target approval.
+
+Migrate & validate has separate acceptance criteria for standalone apps,
+AKS/VMSS/Batch pools, **AVD pooled versus personal**, Databricks, SQL/SAP/stateful
+systems and appliances. Unclassified is not stateless. Common checks cover
+OS-disk application state, stable disk identifiers, local NVMe initialization,
+pagefile/swap/tempdb/scratch, signed/current filter drivers, DNS/LB/routes,
+identity/permissions, post-cutover writes and real recovery capacity. Closeout
+requires restored backup/security/monitoring, licensing review and updated
+Terraform/Bicep/images/autoscale/runbooks so retired sizes are not recreated.
+
+The small compatible-alternatives shortlist preserves V5-first recommendations;
+it exposes architecture separately from CPU vendor and quota CPUs separately
+from effective CPUs. Unsupplied vendor/effective/local-capacity facts stay Unknown.
+It is not service node-type certification or utilization-based right-sizing.
+
+Start here identifies captured catalogue/quota-map dates and lifecycle overrides.
+Near-findings evidence keys distinguish indexed ARG, live ARM and customer-confirmed
+guest/workload evidence. Official Current/Extended/End-of-life/Retired vocabulary
+is explained separately from internal RETIRE/EOL/OPTIONAL actions: OPTIONAL does
+not assert Current, and a retirement announcement does not mean already retired.
+Catalogue coverage also lists native Advisor Compute retirement-text candidates
+for reconciliation with official lifecycle and Service Health; this optional view
+is neither exhaustive nor an automatic reclassification feed.
 
 ### Workload discovery and live target availability
 
@@ -137,7 +204,7 @@ Observed guest OS takes precedence over image labels. Hints never mark boot,
 driver or traffic validation Met. Windows Server 2019 shared-disk NVMe compatibility
 requires separate review.
 
-In **Upgrade paths > Live target availability**, choose V5/V6 and select a distinct
+In **Upgrade paths > Live target availability**, choose V5/V6/V7 and select a distinct
 **subscription / region / zone / target SKU combination**, rather than a VM.
 Affected resource/instance counts show the shared scope. Regional means no zone
 was specified, not all-zone support. Multi-zone scale-set models contribute a row
@@ -166,8 +233,19 @@ new service or additional ARM SKU request is required. The record's JSON can
 arrive as an object or JSON string; both are normalized and missing data stays
 Unknown. The summary and raw evidence preserve the selected placement context.
 This inspector does not overwrite catalogue recommendations or prerequisite statuses.
-Per-resource quota prerequisites remain Unknown: the separate quota tab evaluates
-the default V5-first fleet model, not an arbitrary V6 path.
+Per-resource quota prerequisites remain Unknown: use the separate quota tab's
+matching Default V5-first, V5-only, V6-only or V7-only scenario. A missing compatible
+target stays Unknown instead of falling back to another generation. Scenario
+selection changes quota modelling only, not the Inventory recommendation.
+
+The same live SKU record also powers compact **per-resource capability details**:
+attached data disk/NIC counts against target ceilings, provisioned attached-disk
+IOPS/MBps, target cached/uncached IOPS/MBps, architecture/manufacturer and quota/
+effective CPUs. Select Details or export for the full evidence; no extra ARM
+request is introduced. Incomplete attached-disk/NIC visibility, missing/duplicate
+limits and VMSS instance uncertainty cannot become green count checks.
+Provisioned ceilings are not observed demand; cached and uncached paths are not
+additive. Performance/guest/vendor/placement validation stays Unknown.
 
 The About coverage table explicitly retains SKUs outside the captured catalogue
 as **Not assessed**. Absence from the impacted table does not establish that an
@@ -237,9 +315,9 @@ target specs sit side by side.
 
 ![Target mapping tab](docs/images/target-mapping.png)
 
-### Upgrade paths: stacked V5 and V6 assessments
+### Upgrade paths: stacked V5, V6 and V7 assessments
 
-Select **Upgrade paths** to compare the same retiring resources in two stacked,
+Select **Upgrade paths** to compare the same retiring resources in three stacked,
 full-width panels. Each selects a target from that generation's captured catalogue; a missing
 match is **manual selection required**, never a silent fallback to another generation.
 
@@ -247,23 +325,23 @@ match is **manual selection required**, never a silent fallback to another gener
   memory, local-disk presence/known capacity and premium-storage support. Do not
   force Gen1 conversion, an OS upgrade or decryption when the selected resize
   target does not require that conversion.
-- **V6:** independently evaluated Gen2/NVMe requirements. Gen1 conversion or a
+- **V6/V7:** independently evaluated Gen2/NVMe requirements. Gen1 conversion or a
   rebuild, OS eligibility, image/disk/boot-driver compatibility and actual boot
   rehearsal are called out where applicable. Unknown target local-disk capacity
   stays unverified, not assumed equal.
-- **Both:** MANA/accelerated networking is independent of the disk controller.
+- **Every path:** MANA/accelerated networking is independent of the disk controller.
   Validate quota/restrictions/policy, zone/cluster availability, storage performance,
   disk/NIC limits, application behavior, recoverable backups and rollback.
 
 The OS disk's ADE configuration is an observed **configuration signal**, not proof
 of current guest BitLocker state. A Server 2016 image SKU is an **image hint**, not
 proof that the guest has not since been upgraded. Custom/gallery lineage does not
-prove a missing driver. These unknowns remain visible in both panels.
+prove a missing driver. These unknowns remain visible in every panel.
 
 Windows OS/encryption and Backup/ASR prerequisites of the documented
 Gen1-to-Trusted-Launch conversion are explicitly distinguished from an ordinary
 resize or a rebuild. No guest inspection or migration is performed by the workbook.
-Each panel exports the additional evidence columns; neither displays a synthetic
+Each panel exports the additional evidence columns; none displays a synthetic
 "ready" score while guest compatibility is unverified.
 
 Each prerequisite has its own **Met / Not met / Unknown / Not applicable**
@@ -286,7 +364,7 @@ one row per subscription:
 | --- | --- |
 | Scope | The total or subscription name; IDs remain available in exports |
 | Current cores | Configured retirement/EOL source quota-vCPUs, not all workload usage; includes deallocated inventory |
-| Target cores | Their default V5-first target quota-vCPUs in the current regions |
+| Target cores | Their selected scenario's target quota-vCPUs in the current regions; default is V5-first |
 | Delta (+/-) | Target minus current; a signed inventory difference, **not** the quota request |
 | Quota status | Red if any required regional/family quota is insufficient; orange for unknown coverage; green means quota only |
 
@@ -295,6 +373,10 @@ and all subscriptions you can read in the current tenant. The latter is not a
 claim of access to every tenant subscription. Other tabs keep their original
 subscription scope. Lifecycle display filters do not remove retirement/EOL demand.
 Scale sets use model capacity and Flexible members are not double-counted.
+Use **Target scenario** to independently estimate the V5-only, V6-only or V7-only
+compatible paths. Missing targets/CPU-family metadata remain Unknown and never
+fall back to another generation. The selected generation is a quota model, not
+an automatic migration approval or a change to Inventory recommendations.
 
 - **Side-by-side:** the entire target fleet needs additional cores while sources
   remain allocated.
@@ -560,16 +642,20 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # all 28 live ARG queries in the current CLI subscription
+python scripts/validate_queries.py    # all 33 live ARG queries in the current CLI subscription
 # Optional quota scope / migration approach (CLI authorization scope remains --subscription):
-# python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace
+# python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace --quota-generation 6
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 53 offline tests, all 28 live ARG queries, quota and pricing/SQL boundary
+scope: 63 offline tests, all 33 live ARG queries plus 12 V5/V6/V7 quota-scenario
+queries, standalone-dependency regression checks, 24 quota and pricing/SQL boundary
 fixtures, workload-discovery fixtures and exact live target-SKU records. Additional
 ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,
-nine placement cases on both paths and all 22 prerequisite summary counts.
+nine placement cases on all three paths and all 22 prerequisite summary counts.
+Capability tests evaluate the production KQL for 12 disk/NIC boundary/Unknown
+cases, two attached-disk/placement/ADE/appliance fixtures and real selected
+V5/V6/V7 SKU/compute combinations. A missing live SKU remains Unknown, not approval.
 The access classifier is exercised with 38 synthetic cases, four captured F2/G1
 placements and four complete-query parameter shapes (object/string/empty/null).
 Only explicit ARG throttling is retried, at most twice with visible 30/60-second
@@ -636,8 +722,9 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 28 ARG queries while keeping the saved workbook below
-1 MB. Rebuilds fail if that limit is reached; use the current published template
+628-size catalogue and all 33 ARG queries while keeping the saved workbook below
+1 MB. Standalone workbook files are emitted compactly; both raw-file and saved-resource
+sizes are validated. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.
 
 ### Layout conventions

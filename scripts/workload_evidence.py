@@ -54,7 +54,7 @@ def sql_evidence_query():
     by VmId"""
 
 
-def compute_evidence_query():
+def compute_evidence_query(filter_workload=True):
     # Fold child-resource evidence before joining owners to avoid ARG join limits.
     return """resources
 | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets',
@@ -86,11 +86,16 @@ def compute_evidence_query():
 | summarize ComputeRows = countif(IsSelf),
         VM = take_anyif(pack('id', id, 'type', type, 'name', name, 'resourceGroup', resourceGroup, 'subscriptionId', subscriptionId,
             'location', location, 'properties', properties, 'sku', sku, 'tags', tags,
-            'identity', identity, 'plan', plan, 'managedBy', managedBy), IsSelf),
+            'identity', identity, 'plan', plan, 'managedBy', managedBy, 'zones', zones), IsSelf),
         AttachedVmIds = make_set_if(tolower(id), IsCompute and not(IsSelf), 2000),
         NicRows = countif(IsNic), AcceleratedNicRows = countif(IsNic and tobool(properties.enableAcceleratedNetworking) == true),
         NicFlagRows = countif(IsNic and isnotnull(tobool(properties.enableAcceleratedNetworking))),
         DiskRows = countif(IsDisk), SharedDiskRows = countif(IsDisk and toint(properties.maxShares) > 1),
+        AdeDiskRows = countif(IsDisk and tobool(properties.encryptionSettingsCollection.enabled) == true),
+        DiskIops = sumif(tolong(properties.diskIOPSReadWrite), IsDisk),
+        DiskMBps = sumif(toreal(properties.diskMBpsReadWrite), IsDisk),
+        DiskIopsKnown = countif(IsDisk and isnotnull(tolong(properties.diskIOPSReadWrite))),
+        DiskMBpsKnown = countif(IsDisk and isnotnull(toreal(properties.diskMBpsReadWrite))),
         AdeExtensionRows = countif(IsAdeExtension), SapExtensionRows = countif(IsSapExtension),
         SqlExtensionRows = countif(IsSqlExtension), SqlRegistrationRows = countif(IsRegistration),
         SqlGroupIds = make_set_if(tostring(properties.sqlVirtualMachineGroupResourceId), IsRegistration, 20)
@@ -100,6 +105,8 @@ def compute_evidence_query():
 | summarize VM = take_anyif(VM, ComputeRows > 0), ComputeRows = sum(ComputeRows),
         NicRows = sum(NicRows), AcceleratedNicRows = sum(AcceleratedNicRows), NicFlagRows = sum(NicFlagRows),
         DiskRows = sum(DiskRows), SharedDiskRows = sum(SharedDiskRows), AdeExtensionRows = sum(AdeExtensionRows),
+        AdeDiskRows = sum(AdeDiskRows), DiskIops = sum(DiskIops), DiskMBps = sum(DiskMBps),
+        DiskIopsKnown = sum(DiskIopsKnown), DiskMBpsKnown = sum(DiskMBpsKnown),
         SapExtensionRows = sum(SapExtensionRows), SqlExtensionRows = sum(SqlExtensionRows),
         SqlRegistrationRows = sum(SqlRegistrationRows), SqlGroupIds = take_anyif(SqlGroupIds, ComputeRows > 0)
     by VmId = tostring(ComputeKey)
@@ -116,6 +123,25 @@ def compute_evidence_query():
          ImageOffer = tostring(Profile.storageProfile.imageReference.offer), ImageSku = tostring(Profile.storageProfile.imageReference.sku),
          GuestOsName = tostring(VM.properties.extended.instanceView.osName)
 | extend ExpectedDisks = coalesce(DataDiskCount, 0) + iff(isnotempty(tostring(Profile.storageProfile.osDisk.managedDisk.id)), 1, 0)
+| extend DiskVisibilityComplete = not(IsVmss) and isnotnull(DataDiskCount) and DiskRows == ExpectedDisks and ExpectedDisks > 0,
+         NicVisibilityComplete = not(IsVmss) and isnotnull(ExpectedNics) and NicRows == ExpectedNics,
+         PlacementEvidence = strcat('Zones: ', tostring(VM.zones),
+             '; Availability set: ', tostring(VM.properties.availabilitySet.id),
+             '; Dedicated Host: ', tostring(VM.properties.host.id),
+             '; Host group: ', tostring(VM.properties.hostGroup.id),
+             '; PPG: ', tostring(VM.properties.proximityPlacementGroup.id),
+             '; Capacity reservation: ', tostring(Profile.capacityReservation.capacityReservationGroup.id),
+             '; Empty/missing associations do not verify target placement'),
+         ApplianceEvidence = iff(ImagePublisher in~ ('fortinet', 'paloaltonetworks', 'cisco',
+             'checkpoint', 'barracudanetworks', 'f5-networks', 'sophos', 'netapp', 'veeam',
+             'cohesity', 'rubrik') or tostring(VM.plan.publisher) in~ ('fortinet', 'paloaltonetworks',
+             'cisco', 'checkpoint', 'barracudanetworks', 'f5-networks', 'sophos', 'netapp',
+             'veeam', 'cohesity', 'rubrik'), strcat('Suspected vendor appliance - image/plan publishers: ',
+             ImagePublisher, '/', tostring(VM.plan.publisher),
+             '; verify exact product/version and target/NIC/driver/HA certification'),
+             'Unknown - image/plan and application owner review required; Marketplace alone is not an appliance signal')
+| extend ProvisionedDiskIops = iff(DiskVisibilityComplete and DiskIopsKnown == ExpectedDisks, DiskIops, tolong('')),
+         ProvisionedDiskMBps = iff(DiskVisibilityComplete and DiskMBpsKnown == ExpectedDisks, DiskMBps, toreal(''))
 | extend AcceleratedNetworking = case(IsVmss, 'Review scale-set NIC configurations',
             isnull(ExpectedNics) or NicRows != ExpectedNics or NicFlagRows != NicRows, 'Unknown - incomplete NIC evidence',
             strcat(AcceleratedNicRows, ' of ', ExpectedNics, ' NICs enabled')),
@@ -131,7 +157,9 @@ def compute_evidence_query():
          SecurityType = iff(isempty(tostring(Profile.securityProfile.securityType)), 'Not recorded - verify effective security type', tostring(Profile.securityProfile.securityType)),
          SystemAssignedIdentity = iff(tostring(VM.identity.type) contains 'SystemAssigned', 'Present - preserve/re-authorize if rebuilding', 'No system-assigned identity recorded'),
          MarketplacePlan = strcat(tostring(VM.plan.publisher), ' / ', tostring(VM.plan.product)),
-         AdeEvidence = iff(AdeExtensionRows > 0, 'Extension observed - guest encryption state unverified', 'Guest encryption state unverified'),
+         AdeEvidence = case(AdeExtensionRows > 0, 'Extension observed - guest encryption state unverified',
+             AdeDiskRows > 0, 'Attached-disk ADE configuration observed - confirm OS/data and guest state',
+             'Guest encryption state unverified'),
          InventoryRole = case(IsVmss, 'Scale-set model', isnotempty(tostring(Profile.virtualMachineScaleSet.id)), 'Flexible member detail - do not add to model capacity', 'Standalone VM')
 | join kind=leftouter (
     resources
@@ -183,10 +211,13 @@ def compute_evidence_query():
 """ + os_eligibility_query() + """
 | extend CatalogueRecord = tostring(parse_json('{LifecycleSkuMap}')[VmSize])
 | extend CatalogueCoverage = iff(isempty(CatalogueRecord), 'Not assessed - SKU absent from captured catalogue', tostring(split(CatalogueRecord, '|')[0]))
-| where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'
+""" + ("| where '{DiscoveryWorkload}' == 'All' or Workload contains '{DiscoveryWorkload}'\n"
+       if filter_workload else "") + """
 | project Name, ResourceGroup, SubscriptionId, Region, VmSize, CatalogueCoverage, Workload, MigrationMethod,
     AcceleratedNetworking, ExpectedNics, DataDiskCount, SharedDiskEvidence, EphemeralOsDisk,
     UnmanagedDiskEvidence, Hibernation, SecurityType, SystemAssignedIdentity, MarketplacePlan, AdeEvidence,
+    AdeDiskRows, ApplianceEvidence, PlacementEvidence, DiskVisibilityComplete, NicVisibilityComplete,
+    ProvisionedDiskIops, ProvisionedDiskMBps,
     OsHintSource, NvmeOsHint, ManaOsHint, NvmeDriverValidation, ManaDriverValidation,
     OsReferenceChecked, NvmeOsReference, ManaOsReference, AssociationEvidence, OwnerIds, AvdHostPoolIds,
     SqlGroupIds, MigrationApproval, InventoryRole, ResourceId

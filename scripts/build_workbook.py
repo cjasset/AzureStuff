@@ -19,6 +19,8 @@ import json
 import os
 import uuid
 
+from migration_guidance import (CLOSEOUT, COMMON_GATES, ROUTES, WORKLOADS,
+                                advisor_query, alternatives_query, target_fit_query)
 from workload_evidence import (compute_evidence_query, configured_pools_query,
                                os_eligibility_query, service_inventory_query,
                                sql_evidence_query)
@@ -41,10 +43,11 @@ BASE_LOOKUP_PARAMETERS = ("LifecycleSkuMap", "TargetRegionMap", "RegionIdMap")
 PATH_LOOKUP_PARAMETERS = {
     generation: (f"V{generation}PathSkuMap", f"V{generation}PathRegionMap",
                  f"V{generation}PathRegionIdMap")
-    for generation in (5, 6)
+    for generation in (5, 6, 7)
 }
 LOOKUP_PARAMETERS = BASE_LOOKUP_PARAMETERS + tuple(
-    name for names in PATH_LOOKUP_PARAMETERS.values() for name in names) + ("QuotaFamilyMap", "QuotaCoreMap")
+    name for names in PATH_LOOKUP_PARAMETERS.values() for name in names) + (
+        "QuotaFamilyMap", "QuotaCoreMap", "CompatibleTargetMap", "TargetSpecMap")
 
 # Preview mode: restrict the embedded lookup to a named set of sizes so the
 # generated workbook is small enough to paste into the portal for visual review.
@@ -328,7 +331,7 @@ def target_warning_codes(record, target):
 
 
 def select_path_target(record, generation):
-    candidates = compatible_targets(record, generation, allow_unknown_temp_capacity=(generation == 6))
+    candidates = compatible_targets(record, generation, allow_unknown_temp_capacity=(generation >= 6))
     if not candidates:
         return {}, {}, {"path_target_unavailable"}
     current = record["current"]
@@ -590,6 +593,9 @@ def base_query(sku_map, tgt_regions, region_ids, include_optional=True,
         Lifecycle == 'RETIRE', 'Retirement announced - action required',
         Lifecycle == 'EOL', 'End of life - plan migration',
         'Optional modernization')
+| extend OfficialLifecycleStage = case(
+        Lifecycle == 'EOL', 'End of life - captured announcement',
+        'Unknown - reconcile official Current/Extended/End-of-life/Retired stage; announcement alone is not stage proof')
 | extend Blockers = trim(', ', strcat(
         iff(NeedsGen2 == 1, 'Gen1 to Gen2 conversion, ', ''),
         iff(GenUnknown == 1, 'Confirm VM generation, ', ''),
@@ -680,6 +686,11 @@ def sql_modernization_query(sku_map, regions, region_ids):
 def quota_inventory_query(base):
     return base + """
 | where Lifecycle != 'OPTIONAL'
+| extend QuotaPath = case('{QuotaGeneration}' == '5', parse_json('{V5PathSkuMap}')[VmSize],
+         '{QuotaGeneration}' == '6', parse_json('{V6PathSkuMap}')[VmSize],
+         '{QuotaGeneration}' == '7', parse_json('{V7PathSkuMap}')[VmSize], '')
+| extend RecommendedTarget = iff('{QuotaGeneration}' == 'default', RecommendedTarget,
+         tostring(split(tostring(QuotaPath), '|')[3]))
 """ + quota_scope_filter("SubscriptionId") + """
 | extend SourceQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(VmSize)]),
          TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),
@@ -891,6 +902,8 @@ def quota_planning_items(base):
             ("QuotaDetails", "Show detail", "none",
              [("none", "Summary only"), ("migration", "Migration breakdown"),
               ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion")]),
+            ("QuotaGeneration", "Target scenario", "default",
+             [("default", "Default V5-first"), ("5", "V5 only"), ("6", "V6 only"), ("7", "V7 only")]),
         )
     ]
     parameters.append({
@@ -910,7 +923,7 @@ def quota_planning_items(base):
             "cannot include subscriptions hidden by permissions. Other workbook tabs retain their original scope.\n\n"
             "| Column | Key |\n| --- | --- |\n"
             "| Current cores | Captured quota-vCPUs of retirement/EOL sources, not all workloads in the subscription. VMSS capacity is counted once; deallocated inventory is included, not asserted to consume quota today. |\n"
-            "| Target cores | Quota-vCPUs needed by their default V5-first targets in the current regions. |\n"
+            "| Target cores | Quota-vCPUs needed by the selected target scenario in the current regions. Default remains V5-first; V5/V6/V7-only scenarios use their independent compatible path targets. Missing targets stay Unknown, never fall back to another generation. |\n"
             "| Delta (+/-) | Target minus current: positive means growth, negative means reduction. **Not** the quota request size. |\n"
             "| Quota status | **Red: Insufficient quota** if any region or destination family is short. **Orange: Unknown** for missing quota/metadata or unverified in-place allocation. Green means quota only, not migration approval. |\n\n"
             "**Every affected subscription/region/family is checked automatically**, using indexed Compute "
@@ -930,7 +943,9 @@ def quota_planning_items(base):
             "This workbook neither inspects quota-group eligibility nor moves quota.\n\n"
             "**Quota is not physical capacity.** SKU/zone restrictions, policy, boot/driver compatibility "
             "and actual allocation still require validation. Targets use captured SKU `vCPUs`, not constrained "
-            "`vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand.",
+            "`vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand. "
+            "The scenario does not change Inventory recommendations or approve a path. "
+            "Service quotas, autoscaler maxima, surge and Batch demand require separate planning.",
             "quota-intro"),
         summary, demand, checks, headroom,
     ]
@@ -1070,11 +1085,11 @@ WORKFLOW_REPORTS = {
         ("Fleet overview", "overview"), ("Retirement & pricing", "impacted"),
         ("Workloads & owners", "discovery"), ("Catalogue coverage", "coverage")]),
     "assess": ("AssessView", [
-        ("V5 / V6 paths", "paths"), ("Required actions", "prereq"),
+        ("V5 / V6 / V7 paths", "paths"), ("Routes & gates", "routes"), ("Required actions", "prereq"),
         ("SQL opportunities", "sql")]),
     "planning": ("PlanView", [
         ("Capacity & quota", "quota"), ("Target specifications", "mapping"),
-        ("Suggested waves", "plan")]),
+        ("Compatible alternatives", "alternatives"), ("Suggested waves", "plan")]),
 }
 WORKFLOW_GUIDANCE = {
     "start": (
@@ -1115,7 +1130,8 @@ WORKFLOW_GUIDANCE = {
         "Confirm target eligibility and actual capacity separately, request quota where needed, "
         "schedule prerequisite work, and agree pilot, downtime, backup and rollback plans.",
         "An execution plan. Quota headroom is not physical capacity or transferable quota; the "
-        "quota model uses default V5-first targets, not an arbitrary V6 selection or managed-pool peak.",
+        "quota model defaults to V5-first; select the matching V5/V6/V7 scenario explicitly. "
+        "Managed-pool peak/surge demand needs separate planning.",
     ),
     "migrate": (
         "4. Migrate & validate - how do I execute safely?",
@@ -1185,6 +1201,14 @@ def workflow_layout(items):
             f"## {title}\n\n**Goal:** {goal}\n\n**What to do:** {actions}\n\n"
             f"**Before moving on:** {checkpoint}\n\n**Outcome / interpretation:** {outcome}",
             f"workflow-guide-{key}")]
+        if key in ("inventory", "assess", "planning"):
+            stage_items.append(text_item(
+                "**Evidence key:** catalogue/reference dates are shown in Start here. "
+                "Inventory, ownership, Advisor and quota are **indexed ARG** data at refresh, "
+                "not real-time allocation or guest telemetry. The selected SKU record is "
+                "**live ARM** at inspection. Guest/application/recovery evidence is "
+                "**customer-confirmed** and stays Unknown here until independently verified.",
+                f"workflow-evidence-{key}"))
         if key == "start":
             stage_items.append(text_item(
                 "| Stage | Question | Take away |\n| --- | --- | --- |\n"
@@ -1213,6 +1237,20 @@ def workflow_layout(items):
         elif key == "about":
             stage_items.extend(reports["about"]["content"]["items"])
         elif key == "migrate":
+            stage_items.extend(route_guide_items("migrate"))
+            stage_items.append(text_item(
+                "### Choose workload acceptance criteria\n\n"
+                "Use observed ownership and the application owner's assessment to choose a pattern. "
+                "For AVD, confirm pooled versus personal in Independent service registrations. "
+                "Selection changes guidance only; it is not a recorded migration decision.",
+                "workflow-acceptance-intro"))
+            stage_items.append(navigation_item(
+                "workflow-acceptance-select", "AcceptancePattern",
+                [(label, value) for value, (label, _) in WORKLOADS.items()]))
+            stage_items.extend(conditional_text(
+                f"workflow-acceptance-{value}", "AcceptancePattern", value, guidance)
+                for value, (_, guidance) in WORKLOADS.items())
+            stage_items.append(text_item(CLOSEOUT, "workflow-closeout"))
             stage_items.append(text_item(
                 "### Execution and acceptance checklist\n\n"
                 "| When | Customer action | Evidence / decision to record outside the workbook |\n"
@@ -1314,6 +1352,54 @@ def assessment_key():
         "assessment-column-key")
 
 
+def conditional_text(name, parameter, value, guidance):
+    item = group_item(name, value, [text_item(guidance, name + "-text")])
+    item["conditionalVisibility"]["parameterName"] = parameter
+    return item
+
+
+def route_guide_items(prefix):
+    return [
+        text_item("### Choose a migration route\n\n"
+                  "This selector changes guidance, not resources, recommendations or approval. "
+                  "A workload can need more than one operation; read each applicable route. "
+                  "Resolve the per-resource evidence and gates before selecting a supported method.",
+                  prefix + "-route-intro"),
+        navigation_item(prefix + "-route-select", "MigrationRoute",
+                        [(label, value) for value, (label, _) in ROUTES.items()]),
+        *(conditional_text(prefix + "-route-" + value, "MigrationRoute", value, guidance)
+          for value, (_, guidance) in ROUTES.items()),
+    ]
+
+
+def compatible_target_maps(data):
+    sources, specs = {}, {}
+    lifecycle = build_lookups(data)[0]
+    for record in data["skus"]:
+        if lifecycle.get(record["sku"], "").split("|")[0] not in ("RETIRE", "EOL"):
+            continue
+        candidates = []
+        for generation in (5, 6, 7):
+            targets = compatible_targets(record, generation, allow_unknown_temp_capacity=generation >= 6)
+            targets.sort(key=lambda t: (t["vcpu"], t["memory_gb"], t["sku"]))
+            candidates.extend(targets[:2])
+            preferred = select_path_target(record, generation)[0]
+            if preferred and preferred not in candidates:
+                candidates.append(preferred)
+        if candidates:
+            sources[record["sku"]] = [target["sku"] for target in candidates]
+        for target in candidates:
+            name = target["sku"]
+            specs[name] = [
+                int(name.rsplit("_v", 1)[1]), target["cpu_arch"],
+                target.get("cpu_vendor") or "Unknown - vendor certification required",
+                target["vcpu"], target["memory_gb"], target.get("temp_disk_gb"),
+                "Present - capacity unverified" if target.get("has_temp_disk") and target.get("temp_disk_gb") is None
+                else "Present" if target.get("has_temp_disk") else "None",
+                target["nvme_required"], target["hyperv_generations"], target.get("premium_io")]
+    return sources, specs
+
+
 def upgrade_path_panel(generation, lookups):
     sku_map, _, _, regions, region_ids = lookups
     query = base_query(
@@ -1352,7 +1438,7 @@ def upgrade_path_panel(generation, lookups):
         EncryptionEvidence, '. ', ImageProvenance,
         '. ', NvmeOsHint, '. ', ManaOsHint,
         '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
-        'Use Capacity / quota for the default V5-first fleet model; that result is not a V6-path quota approval.',
+        'Use Capacity / quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
@@ -1413,7 +1499,7 @@ def upgrade_path_panel(generation, lookups):
         "if that selected target is Gen2-only; do not assume decryption or an OS "
         "upgrade is mandatory for every v5 resize."
         if generation == 5 else
-        "Evaluate a catalogued v6 target independently. Gen2-only and NVMe requirements "
+        f"Evaluate a catalogued v{generation} target independently. Gen2-only and NVMe requirements "
         "come from that target's metadata, not the version label alone. Rehearse boot "
         "from the actual legacy image/disk before rollout.")
     checklist = (
@@ -1425,7 +1511,7 @@ def upgrade_path_panel(generation, lookups):
         "- Take recoverable backups; test applications and rollback.\n\n"
         "Gen1, Server 2016 and ADE are not blanket v5 blockers."
         if generation == 5 else
-        "**Before a v6 migration**\n\n"
+        f"**Before a v{generation} migration**\n\n"
         "- For a Gen2-only target, convert or rebuild Gen1 guests; confirm supported OS and partition/EFI layout.\n"
         "- For [Gen1-to-Trusted-Launch conversion](https://learn.microsoft.com/azure/virtual-machines/trusted-launch-existing-vm-gen-1), "
         "check Server 2016 exclusion, Windows OS encryption, Backup policy and ASR prerequisites. Rebuilding is a separate route.\n"
@@ -1548,7 +1634,9 @@ def discovery_items():
                       [fmt("ResourceId", 5)] + [fmt(field, 5) for field in (
                           "SubscriptionId", "OwnerIds", "AvdHostPoolIds", "SqlGroupIds",
                           "NvmeOsReference", "ManaOsReference", "OsReferenceChecked",
-                          "NvmeDriverValidation", "ManaDriverValidation")], filter=True)),
+                          "NvmeDriverValidation", "ManaDriverValidation", "AdeDiskRows",
+                          "ApplianceEvidence", "PlacementEvidence", "DiskVisibilityComplete",
+                          "NicVisibilityComplete", "ProvisionedDiskIops", "ProvisionedDiskMBps")], filter=True)),
         text_item(
             "### Service-owned pool configurations\n\n"
             "This is the ownership view for **Batch service-mode compute**, including pools with "
@@ -1691,8 +1779,9 @@ def live_access_query():
 
 def eligibility_items(base):
     source = arg_query(base + """
-| extend PathRecord = tostring(iff('{EligibilityGeneration}' == '5',
-         parse_json('{V5PathSkuMap}')[VmSize], parse_json('{V6PathSkuMap}')[VmSize]))
+| extend PathRecord = tostring(case('{EligibilityGeneration}' == '5',
+         parse_json('{V5PathSkuMap}')[VmSize], '{EligibilityGeneration}' == '6',
+         parse_json('{V6PathSkuMap}')[VmSize], parse_json('{V7PathSkuMap}')[VmSize]))
 | extend SelectedTargetSku = tostring(split(PathRecord, '|')[3]), SourceSubscriptionId = SubscriptionId,
          SourceRegion = Region,
          PlacementOptions = iff(isnull(PlacementZones) or array_length(PlacementZones) == 0,
@@ -1809,7 +1898,7 @@ def eligibility_items(base):
             "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [{
                 "version": "KqlParameterItem/1.0", "name": "EligibilityGeneration", "type": 2,
                 "label": "Inspect upgrade path", "isRequired": True, "value": "5",
-                "jsonData": json.dumps([{"value": str(g), "label": f"V{g}"} for g in (5, 6)])},
+                "jsonData": json.dumps([{"value": str(g), "label": f"V{g}"} for g in (5, 6, 7)])},
                 {"version": "KqlParameterItem/1.0", "name": "LiveEvidence", "type": 2,
                  "label": "Result detail", "isRequired": True, "value": "summary",
                  "jsonData": json.dumps([{"value": "summary", "label": "Customer summary"},
@@ -1829,6 +1918,36 @@ def eligibility_items(base):
              {"type": 9, "name": "eligibility-record-parameter", "content": {
                  "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [record_parameter]}},
              summary,
+             text_item(
+                 "### Per-resource target capability details\n\n"
+                 "Uses the same full live SKU record. Counts are attached/model configuration, "
+                 "not guest workload measurements. VMSS instance counts/visibility stay Unknown. "
+                 "Select **Details** for limits, effective versus quota CPUs, cached/uncached "
+                 "storage ceilings and placement dependencies. Blank means not supplied/Unknown. "
+                 "Provisioned disk totals include OS and data disks only when every attached "
+                 "managed disk has indexed values; these are **ceilings, not observed demand**. "
+                 "Cached and uncached paths are different limits, not additive capacity. "
+                 "Validate cache modes, disk tier/burst/VM limits, NIC bandwidth and actual "
+                 "application baseline. Count-only green checks are not performance approval. "
+                 "CPU architecture is not CPU vendor; missing manufacturer remains Unknown. "
+                 "Effective vCPUs can be constrained; quota uses `vCPUs`, not `vCPUsAvailable`. "
+                 "This table groups resources by the selected subscription/region/target and "
+                 "does not approve their zone, PPG, host or reservation placement.",
+                 "eligibility-fit-intro"),
+             arg_query(target_fit_query(compute_evidence_query(filter_workload=False)) + "\n| extend Details = 'Details'",
+                       "eligibility-fit", size=1, export=True,
+                       title="Resource counts versus live target limits - select Details for capability evidence",
+                       grid=grid_settings(
+                           {"Resource": "20ch", "DataDisks": "10ch", "MaxDataDisks": "12ch",
+                            "DiskCountCheck": "18ch", "Nics": "8ch", "MaxNics": "10ch",
+                            "NicCountCheck": "18ch", "Details": "10ch"},
+                           [fmt("Details", 1, formatOptions={"linkTarget": "GenericDetails",
+                                                            "linkIsContextBlade": True})]
+                           + [fmt(name, 5) for name in (
+                               "Source", "Target", "ResourceId", "QuotaVcpus", "EffectiveVcpus",
+                               "CpuArchitecture", "CpuVendor", "ProvisionedDiskIops", "ProvisionedDiskMBps",
+                               "TargetUncachedIops", "TargetUncachedMBps", "TargetCachedIops", "TargetCachedMBps",
+                               "Placement", "PerformanceCheck", "CheckedAt")], filter=True)),
          ]}},
     ]
 
@@ -1836,12 +1955,13 @@ def eligibility_items(base):
 def build(data):
     sku_map, spec_map, url_map, tgt_regions, region_ids = build_lookups(data)
     path_lookups = {generation: build_lookups(data, path_generation=generation)
-                    for generation in (5, 6)}
+                    for generation in (5, 6, 7)}
     shared_lookups = dict(zip(BASE_LOOKUP_PARAMETERS, (sku_map, tgt_regions, region_ids)))
     with open(os.path.join(REFS, "quota-families.json"), encoding="utf-8-sig") as f:
         quota_metadata = json.load(f)
     shared_lookups["QuotaFamilyMap"] = quota_metadata["families"]
     shared_lookups["QuotaCoreMap"] = quota_metadata["vcpus"]
+    shared_lookups["CompatibleTargetMap"], shared_lookups["TargetSpecMap"] = compatible_target_maps(data)
     for generation, lookup in path_lookups.items():
         shared_lookups.update(zip(PATH_LOOKUP_PARAMETERS[generation],
                                   (lookup[0], lookup[3], lookup[4])))
@@ -1891,9 +2011,10 @@ def build(data):
                     "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"workflow:{name}")),
                     "version": "KqlParameterItem/1.0", "name": name, "type": 1,
                     "isRequired": True, "isHiddenWhenLocked": True, "value": value,
-                    "isGlobal": name == "WorkflowStage",
+                    "isGlobal": name in ("WorkflowStage", "MigrationRoute", "AcceptancePattern"),
                 }
-                for name, value in [("WorkflowStage", "start")] + [
+                for name, value in [("WorkflowStage", "start"), ("MigrationRoute", "parallel"),
+                                    ("AcceptancePattern", "unknown")] + [
                     (parameter, options[0][1])
                     for parameter, options in WORKFLOW_REPORTS.values()
                 ]
@@ -1962,16 +2083,71 @@ def build(data):
 
     items.append(navigation_item("tabs", "WorkflowStage", WORKFLOW_STAGES))
 
+    items.append(group_item("grp-routes", "routes", [
+        text_item("## Choose the supported operation, not just a target SKU\n\n"
+                  "Review **Details** for observed ADE, suspected appliance, placement and ownership "
+                  "signals. Missing evidence is Unknown, not cleared. Guest OS/encryption and vendor "
+                  "certification require customer confirmation. The global lifecycle display filter "
+                  "does not hide ownership/dependency evidence here.",
+                  "routes-intro"),
+        arg_query(compute_evidence_query(filter_workload=False) + "\n| extend Details = 'Details'",
+                  "routes-evidence", size=1, export=True,
+                  title="Workload route evidence - all observed compute, including unassessed sizes",
+                  grid=grid_settings(
+                      {"Name": "20ch", "Workload": "24ch", "MigrationMethod": "65ch", "Details": "10ch"},
+                      [fmt("Details", 1, formatOptions={"linkTarget": "GenericDetails",
+                                                       "linkIsContextBlade": True})]
+                      + [fmt(name, 5) for name in (
+                          "ResourceGroup", "SubscriptionId", "Region", "VmSize", "CatalogueCoverage",
+                          "AcceleratedNetworking", "ExpectedNics", "DataDiskCount", "SharedDiskEvidence",
+                          "EphemeralOsDisk", "UnmanagedDiskEvidence", "Hibernation", "SecurityType",
+                          "SystemAssignedIdentity", "MarketplacePlan", "AdeEvidence", "AdeDiskRows",
+                          "ApplianceEvidence", "PlacementEvidence", "DiskVisibilityComplete",
+                          "NicVisibilityComplete", "ProvisionedDiskIops", "ProvisionedDiskMBps",
+                          "OsHintSource", "NvmeOsHint", "ManaOsHint", "NvmeDriverValidation",
+                          "ManaDriverValidation", "OsReferenceChecked", "NvmeOsReference", "ManaOsReference",
+                          "AssociationEvidence", "OwnerIds", "AvdHostPoolIds", "SqlGroupIds",
+                          "MigrationApproval", "InventoryRole", "ResourceId")], filter=True)),
+        *route_guide_items("assess"),
+        text_item(COMMON_GATES, "routes-common-gates"),
+    ]))
+    items.append(group_item("grp-alternatives", "alternatives", [
+        text_item("## Small compatible target shortlist\n\n"
+                  "Up to two closest captured candidates per generation plus that generation's "
+                  "preferred path, not every possible Azure size. The **default remains V5-first**. "
+                  "Select Details for architecture versus CPU vendor, quota versus effective CPUs, "
+                  "memory, local-disk and controller tradeoffs. Candidate filters preserve captured "
+                  "CPU architecture, CPU/memory, local-disk presence and known capacity and premium IO. "
+                  "V6/V7 unknown local-disk capacity remains an explicit validation gate. "
+                  "No target record means no assessed candidate, never a suffix-invented SKU.\n\n"
+                  "Vendor and effective CPUs are Unknown if the catalogue does not supply them; "
+                  "inspect the live target SKU record and product/vendor certification. "
+                  "Use **Assess > paths > Live target availability** for the selected target's "
+                  "count/performance ceilings. This is not utilization-based right-sizing, "
+                  "service-supported node-type certification or a region/zone/quota approval.",
+                  "alternatives-intro"),
+        arg_query(alternatives_query() + "\n| extend Details = 'Details'", "target-alternatives",
+                  size=1, export=True, title="Captured compatible candidates for retiring/EOL resources",
+                  grid=grid_settings(
+                      {"Resource": "22ch", "Source": "22ch", "Target": "25ch", "Generation": "10ch",
+                       "QuotaVcpus": "10ch", "MemoryGB": "12ch", "Details": "10ch"},
+                      [fmt("Details", 1, formatOptions={"linkTarget": "GenericDetails",
+                                                       "linkIsContextBlade": True})]
+                      + [fmt(name, 5) for name in ("CpuArchitecture", "CpuVendor", "EffectiveVcpus",
+                          "LocalDiskGB", "LocalDisk", "NvmeRequired", "HyperVGenerations", "PremiumIO",
+                          "Decision", "ResourceId", "Region", "SubscriptionId")], filter=True)),
+    ]))
     items.append(group_item("grp-paths", "paths", [
         text_item(
             "## Compare upgrade paths\n\n"
-            "The same retiring resources are assessed against **independent V5 and V6 targets**. "
+            "The same retiring resources are assessed against **independent V5, V6 and V7 targets**. "
             "No suitable catalogue match means manual selection, not a fallback to another generation. "
             "These panels distinguish observed configuration from prerequisites and **unverified guest readiness**. "
             "They do not resize a VM or certify a migration. Export either grid for the full evidence columns.",
             "paths-intro"),
         upgrade_path_panel(5, path_lookups[5]),
         upgrade_path_panel(6, path_lookups[6]),
+        upgrade_path_panel(7, path_lookups[7]),
         assessment_key(),
     ] + eligibility_items(base_query(
         sku_map, tgt_regions, region_ids, include_optional=False, use_lookup_parameters=True,
@@ -2161,7 +2337,7 @@ def build(data):
 | where '{LifecycleFilter}' has Lifecycle
 | project Name, ResourceGroup, Region, VmSize, Instances, VmGeneration,
           RecommendedTarget, TargetInRegion, RetiresOn, ReadinessScore,
-          Blockers, MigrationApproval, ResourceId
+          Blockers, MigrationApproval, ResourceId, Lifecycle, OfficialLifecycleStage
 | order by ReadinessScore asc, RetiresOn asc""",
         "imp-grid", size=1, export=True, title="Retiring virtual machines and scale sets",
         grid=grid_settings(
@@ -2188,6 +2364,7 @@ def build(data):
                         {"operator": "Default", "representation": "success",
                          "text": "Available"}]}),
                 fmt("ResourceId", 5),
+                fmt("Lifecycle", 5), fmt("OfficialLifecycleStage", 5),
             ],
             filter=True,
             sortBy=[{"itemKey": "ReadinessScore", "sortOrder": 1}],
@@ -2706,13 +2883,69 @@ def build(data):
                            labelSettings=[{"columnId": "VmSize", "label": "Size"}])))
     items.append(group_item("grp-about", "about", about))
 
-    return {
+    workbook = {
         "version": "Notebook/1.0",
         "items": workflow_layout(items),
         "styleSettings": {},
         "fallbackResourceIds": ["Azure Monitor"],
         "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
     }
+    start = next(item for item in workbook["items"] if item.get("name") == "stage-start")
+    start["content"]["items"].insert(1, text_item(
+        "### Self-contained, with explicit evidence boundaries\n\n"
+        "**Deploys one workbook resource only.** No Log Analytics workspace, custom tables, "
+        "storage account, Function, automation, agent or customer data collection is required. "
+        "Lookups and guidance are embedded; the deployed workbook does not download catalogues "
+        "or run community tools. It reads built-in Azure Resource Graph tables and authenticated "
+        "read-only Compute/Batch ARM APIs using your permissions. It is not offline: Azure "
+        "control-plane access is required. Documentation links are optional references, not data feeds.\n\n"
+        f"**Captured catalogue:** {data['_meta']['generated']} (subscription-view snapshot, not today's offerability). "
+        "**Lifecycle overrides:** 28 September 2026 announcements for v3 EOL, pricing and restrictions. "
+        f"**Quota family/CPU map:** {quota_metadata['capturedAtUtc']}. "
+        "ARG inventory/quota/Advisor are indexed at refresh and may lag; live ARM is requested "
+        "when a placement is selected. Neither proves installed guest drivers or workload readiness.\n\n"
+        "| Official lifecycle vocabulary | Interpretation, separate from workbook actions |\n"
+        "| --- | --- |\n"
+        "| Current | Supported modern series; not an urgency signal by itself |\n"
+        "| Extended | Supported series in a later lifecycle stage; not the same as retired |\n"
+        "| End of life | Announced retirement path; still distinct from retirement effective date |\n"
+        "| Retired | Retirement effective; verify current official date/scope and cloud exemptions |\n\n"
+        "**Internal actions:** RETIRE means a captured retirement announcement; it does not mean "
+        "already retired. EOL is the captured end-of-life group. OPTIONAL does **not** assert "
+        "Current versus Extended. Unmapped stages remain unverified. Reconcile exported findings "
+        "with the [official lifecycle sources](https://learn.microsoft.com/azure/virtual-machines/sizes/lifecycle/lifecycle-overview), "
+        "Advisor candidates under Catalogue coverage, and your tenant's "
+        "[Service Health notices](https://portal.azure.com/#view/Microsoft_Azure_Health/AzureHealthBrowseBlade/~/serviceIssues) "
+        "before approving a wave. An absent Advisor row is not an all-clear.",
+        "workflow-self-contained"))
+    for item in walk_workbook_items(workbook["items"]):
+        if item.get("name", "").startswith("workflow-evidence-"):
+            item["content"]["json"] += (
+                f" **Captured as of:** catalogue {data['_meta']['generated']}; "
+                f"quota family/CPU map {quota_metadata['capturedAtUtc']}.")
+    coverage = next(item for item in walk_workbook_items(workbook["items"])
+                    if item.get("name") == "grp-coverage")
+    coverage["content"]["items"].extend([
+        text_item("### Reconcile native Advisor evidence\n\n"
+                  "Read-only, built-in `AdvisorResources`: retirement-text candidates associated "
+                  "with Compute resources, not an authoritative or exhaustive VM-size retirement "
+                  "feed. Includes other Compute retirement recommendations for owner review. "
+                  "Empty/missing results do not prove absence; investigate indexing, permissions, "
+                  "Service Health notices and official lifecycle dates. Does not change catalogue classifications.",
+                  "advisor-intro"),
+        arg_query(advisor_query(), "advisor-retirement", size=1, export=True,
+                  title="Indexed Advisor Compute retirement candidates - reconcile, do not auto-approve",
+                  grid=grid_settings({"ResourceId": "40ch", "Problem": "45ch", "Recommendation": "60ch"},
+                                     [fmt(name, 5) for name in (
+                                         "Category", "LastUpdated", "ExtendedEvidence", "Evidence", "EvaluatedAt")])),
+    ])
+    return workbook
+
+
+def walk_workbook_items(items):
+    for item in items:
+        yield item
+        yield from walk_workbook_items(item.get("content", {}).get("items", []))
 
 
 def arm_template(workbook):
@@ -2777,7 +3010,7 @@ def main():
 
     wb_path = os.path.join(OUT, f"azure-vm-retirement-workbook{sfx}.json")
     with open(wb_path, "w", encoding="utf-8") as f:
-        json.dump(wb, f, indent=2)
+        json.dump(wb, f, separators=(",", ":"))
 
     arm_path = os.path.join(OUT, f"deploy-workbook{sfx}.json")
     with open(arm_path, "w", encoding="utf-8") as f:
@@ -2793,7 +3026,7 @@ def main():
             json.dump(arm_template(wb), f, indent=2)
         pub_wb = os.path.join(WORKBOOK_DIR, "vm-lifecycle-readiness.workbook")
         with open(pub_wb, "w", encoding="utf-8") as f:
-            json.dump(wb, f, indent=2)
+            json.dump(wb, f, separators=(",", ":"))
         published = [pub_arm, pub_wb]
 
     sku_map, spec_map, url_map, tgt_regions, region_ids = build_lookups(data)

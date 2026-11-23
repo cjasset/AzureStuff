@@ -61,8 +61,8 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def test_workflow_report_selectors_are_independent_and_stage_scoped(self):
         expected = {
             "inventory": ("InventoryView", ["overview", "impacted", "discovery", "coverage"]),
-            "assess": ("AssessView", ["paths", "prereq", "sql"]),
-            "planning": ("PlanView", ["quota", "mapping", "plan"]),
+            "assess": ("AssessView", ["paths", "routes", "prereq", "sql"]),
+            "planning": ("PlanView", ["quota", "mapping", "alternatives", "plan"]),
         }
         parameters = {p["name"]: p for p in find_item(self.workbook, "parameters")["content"]["parameters"]}
         for stage, (parameter, keys) in expected.items():
@@ -138,7 +138,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         coverage = find_item(self.workbook, "grp-coverage")
         self.assertEqual(coverage["conditionalVisibility"]["parameterName"], "InventoryView")
         self.assertEqual({item["name"] for item in coverage["content"]["items"] if item["type"] == 3},
-                         {"about-coverage", "about-allsizes"})
+                         {"about-coverage", "about-allsizes", "advisor-retirement"})
         self.assertFalse(any(item["type"] == 3 for item in walk_items([find_item(self.workbook, "stage-about")])))
 
     def test_saved_workbook_and_arm_resource_fit_size_limit(self):
@@ -161,7 +161,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         lookups = builder.lookup_values(self.workbook)
         sku_map, _, _, regions, region_ids = builder.build_lookups(self.data)
         expected = dict(zip(builder.BASE_LOOKUP_PARAMETERS, (sku_map, regions, region_ids)))
-        for generation in (5, 6):
+        for generation in (5, 6, 7):
             path = builder.build_lookups(self.data, path_generation=generation)
             expected.update(zip(builder.PATH_LOOKUP_PARAMETERS[generation],
                                 (path[0], path[3], path[4])))
@@ -172,7 +172,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
             for p in item["content"]["parameters"]
             if p["name"] in builder.LOOKUP_PARAMETERS
         ]
-        self.assertEqual(len(parameters), 11)
+        self.assertEqual(len(parameters), 16)
         for parameter in parameters:
             self.assertEqual(parameter["type"], 1)
             self.assertTrue(parameter["isHiddenWhenLocked"])
@@ -184,11 +184,21 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 28)
+        self.assertEqual(len(queries), 33)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
             if name == "eligibility-status":
                 self.assertEqual(query, builder.live_access_query())
+            elif name == "eligibility-fit":
+                self.assertTrue(expanded.startswith(builder.expand_lookups(
+                    builder.compute_evidence_query(filter_workload=False), self.workbook)))
+            elif name == "routes-evidence":
+                self.assertTrue(expanded.startswith(builder.expand_lookups(
+                    builder.compute_evidence_query(filter_workload=False), self.workbook)))
+            elif name == "target-alternatives":
+                self.assertTrue(expanded.startswith(builder.expand_lookups(builder.alternatives_query(), self.workbook)))
+            elif name == "advisor-retirement":
+                self.assertEqual(query, builder.advisor_query())
             elif name == "about-allsizes":
                 self.assertEqual(expanded, builder.expand_lookups(builder.coverage_query(), self.workbook))
             elif name.startswith("discovery-"):
@@ -296,12 +306,12 @@ class WorkbookDeploymentTests(unittest.TestCase):
         group = find_item(self.workbook, "grp-sql")
         self.assertEqual(group["conditionalVisibility"]["value"], "sql")
 
-    def test_upgrade_paths_are_two_stacked_full_width_panels_in_one_tab(self):
+    def test_upgrade_paths_are_three_stacked_full_width_panels_in_one_tab(self):
         group = find_item(self.workbook, "grp-paths")
         self.assertEqual(group["conditionalVisibility"]["value"], "paths")
         panels = [i for i in group["content"]["items"] if i["name"].startswith("path-v")]
-        self.assertEqual([p["name"] for p in panels], ["path-v5-panel", "path-v6-panel"])
-        self.assertEqual([p["customWidth"] for p in panels], ["100", "100"])
+        self.assertEqual([p["name"] for p in panels], ["path-v5-panel", "path-v6-panel", "path-v7-panel"])
+        self.assertEqual([p["customWidth"] for p in panels], ["100", "100", "100"])
         for panel in panels:
             self.assertEqual(len(panel["content"]["items"]), 3)
             query = panel["content"]["items"][1]["content"]["query"]
@@ -334,7 +344,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         key = find_item(self.workbook, "assessment-column-key")["content"]["json"]
         for column in builder.ASSESSMENT_CHECKS:
             self.assertIn(f"| {column} |", key)
-        for generation in (5, 6):
+        for generation in (5, 6, 7):
             grid = find_item(self.workbook, f"path-v{generation}-grid")["content"]
             formatters = {f["columnMatch"]: f for f in grid["gridSettings"]["formatters"]}
             visible = {name for name, f in formatters.items() if f["formatter"] != 5}
@@ -344,7 +354,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
             self.assertEqual(grid["exportToExcelOptions"], "all")
 
     def test_assessment_counts_include_every_check_not_just_visible_columns(self):
-        for generation in (5, 6):
+        for generation in (5, 6, 7):
             query = find_item(self.workbook, f"path-v{generation}-grid")["content"]["query"]
             for name in builder.ASSESSMENT_CHECKS:
                 self.assertIn(f"iff({name} == 'Not met', 1, 0)", query)
@@ -451,7 +461,8 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual(merge["projectRename"][0]["originalName"], "[eligibility-live].SkuRecord")
         result = find_item(self.workbook, "eligibility-result")["content"]["items"]
         self.assertEqual([item["name"] for item in result],
-                         ["eligibility-live", "eligibility-record-parameter", "eligibility-status"])
+                         ["eligibility-live", "eligibility-record-parameter", "eligibility-status",
+                          "eligibility-fit-intro", "eligibility-fit"])
         arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
         self.assertEqual({item["name"] for item in arms}, {"eligibility-live", "discovery-batch-live"})
 
@@ -491,7 +502,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
     def test_prerequisite_statuses_preserve_explicit_unknowns(self):
         queries = []
         walk(self.workbook, queries)
-        for generation in (5, 6):
+        for generation in (5, 6, 7):
             query = dict(queries)[f"path-v{generation}-grid"]
             for column in ("TargetSelection", "GenerationSupport", "ConversionOS",
                            "ConversionEncryption", "NvmeBoot", "ManaNetworking",
@@ -522,7 +533,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         group = find_item(self.workbook, "grp-quota")
         controls = next(i for i in group["content"]["items"] if i["name"] == "quota-parameters")
         parameters = controls["content"]["parameters"]
-        self.assertEqual(len(parameters), 4)
+        self.assertEqual(len(parameters), 5)
         self.assertEqual(parameters[0]["name"], "QuotaScope")
         self.assertEqual([o["value"] for o in json.loads(parameters[0]["jsonData"])], ["selected", "tenant"])
         self.assertIn("QuotaResources", check)
