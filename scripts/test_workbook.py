@@ -19,6 +19,25 @@ class WorkbookDeploymentTests(unittest.TestCase):
         cls.data = builder.load()
         cls.workbook = builder.build(cls.data)
 
+    def test_tables_default_to_100_rows_without_changing_queries_or_heights(self):
+        original = builder.grid_settings
+        self.assertEqual(original({}, rows=25)["rowLimit"], 25)
+        with patch("build_workbook.grid_settings",
+                   side_effect=lambda *args, **kwargs: original(*args, **dict(kwargs, rows=10))):
+            previous = builder.build(self.data)
+        previous_items = {item["name"]: item for item in walk_items(previous["items"])}
+        tables = 0
+        for item in walk_items(self.workbook["items"]):
+            if item.get("type") != 3:
+                continue
+            expected = copy.deepcopy(item)
+            if item["content"].get("visualization") == "table":
+                tables += 1
+                self.assertEqual(item["content"]["gridSettings"]["rowLimit"], 100, item["name"])
+                expected["content"]["gridSettings"]["rowLimit"] = 10
+            self.assertEqual(expected, previous_items[item["name"]], item["name"])
+        self.assertGreater(tables, 0)
+
     def test_graph_validation_retries_throttling_and_preserves_exhausted_failure(self):
         failure = subprocess.CompletedProcess([], 1, "", 'ERROR: {"code": "RateLimiting"}')
         success = subprocess.CompletedProcess([], 0, '{"data":[]}', "")

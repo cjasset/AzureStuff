@@ -664,7 +664,7 @@ python scripts/validate_queries.py    # all 33 live ARG queries in the current C
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 63 offline tests, all 33 live ARG queries plus 12 V5/V6/V7 quota-scenario
+scope: 64 offline tests, all 33 live ARG queries plus 12 V5/V6/V7 quota-scenario
 queries, standalone-dependency regression checks, 24 quota and pricing/SQL boundary
 fixtures, workload-discovery fixtures and exact live target-SKU records. Additional
 ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,
@@ -759,6 +759,10 @@ Modelled on the official Advisor *Azure Services Retirement* workbook
   heights: `size: 4` ~126px (3 rows, too cramped), `size: 1` ~220px (~6 rows,
   the balance used here), `size: 2` ~600px (~18 rows, leaves dead space under
   short results).
+- **Tables default to 100 result rows**, rather than 10. Existing grid heights
+  remain bounded, so larger results scroll within the table instead of extending
+  the page. Charts and intentional top-N query summaries are unchanged; their
+  query/data-source limits still apply.
 - **Static dropdowns use `jsonData`**, not `query` + `queryType: 8`. The latter
   never resolves and leaves every dependent query showing *"This query could not
   run because some parameters are not set."*

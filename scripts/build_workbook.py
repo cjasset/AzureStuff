@@ -1051,7 +1051,7 @@ def date_col(col):
     return fmt(col, 6, dateFormat=DATE_FMT)
 
 
-def grid_settings(width_spec, formatters=(), rows=10, **kw):
+def grid_settings(width_spec, formatters=(), rows=100, **kw):
     """Column widths first, then the typed formatters that override them.
 
     Workbooks applies the last matching rule per property, so a width-only
@@ -1059,8 +1059,7 @@ def grid_settings(width_spec, formatters=(), rows=10, **kw):
     only when the typed rule carries the width itself. Any column present in
     both is therefore emitted once, with the width folded into the typed rule.
 
-    `rows` sets gridSettings.rowLimit; without it a grid renders about three
-    rows and scrolls, leaving dead space under short tables.
+    `rows` caps grid result rows independently of the height set by query size.
     """
     typed = {f["columnMatch"]: f for f in formatters}
     rules = []
