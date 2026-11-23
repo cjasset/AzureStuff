@@ -1088,7 +1088,7 @@ WORKFLOW_REPORTS = {
         ("V5 / V6 / V7 paths", "paths"), ("Routes & gates", "routes"), ("Required actions", "prereq"),
         ("SQL opportunities", "sql")]),
     "planning": ("PlanView", [
-        ("Capacity & quota", "quota"), ("Target specifications", "mapping"),
+        ("Availability & quota", "quota"), ("Target specifications", "mapping"),
         ("Compatible alternatives", "alternatives"), ("Suggested waves", "plan")]),
 }
 WORKFLOW_GUIDANCE = {
@@ -1114,8 +1114,8 @@ WORKFLOW_GUIDANCE = {
     "assess": (
         "2. Assess - what could prevent a successful migration?",
         "Choose a candidate path and identify prerequisite work and missing evidence.",
-        "Review V5 first, compare V6 where justified, and inspect the exact selected target's live "
-        "restrictions. Review Required actions and SQL opportunities with the workload owner. "
+        "Review V5 first and compare V6/V7 where justified. Review Routes & gates, Required actions "
+        "and SQL opportunities with the workload owner. Check live target availability and quota in Plan. "
         "Export the detailed grids only when you need the full evidence columns.",
         "Record a preferred target and migration method. Resolve Not met checks and assign every "
         "Unknown check an owner, evidence requirement and decision date.",
@@ -1124,8 +1124,9 @@ WORKFLOW_GUIDANCE = {
     ),
     "planning": (
         "3. Plan - what resources and sequencing will I need?",
-        "Create a feasible, owner-approved plan for quota, remediation, pilots and waves.",
-        "Compare side-by-side and in-place demand, check every subscription/region/family constraint, "
+        "Create a feasible, owner-approved plan for target availability, quota, remediation, pilots and waves.",
+        "Check the selected target's live subscription/region/zone access, then compare side-by-side "
+        "and in-place demand and check every subscription/region/family quota constraint. "
         "review target specifications, and adapt suggested waves to application dependencies.",
         "Confirm target eligibility and actual capacity separately, request quota where needed, "
         "schedule prerequisite work, and agree pilot, downtime, backup and rollback plans.",
@@ -1214,7 +1215,7 @@ def workflow_layout(items):
                 "| Stage | Question | Take away |\n| --- | --- | --- |\n"
                 "| 1. Inventory | What do I have, and why act? | A scoped workload list with owners |\n"
                 "| 2. Assess | What could block the path? | Candidate targets and an evidence backlog |\n"
-                "| 3. Plan | What resources and sequencing are needed? | Quota actions, pilots and waves |\n"
+                "| 3. Plan | What resources and sequencing are needed? | Target access, quota actions, pilots and waves |\n"
                 "| 4. Migrate & validate | How do I execute and accept it? | A runbook and acceptance checklist |\n\n"
                 "**Read this first.** V5-first recommendations preserve captured platform capabilities; "
                 "V5 still needs guest OS, NVMe/MANA where applicable, encryption, application and quota checks. "
@@ -1311,7 +1312,7 @@ ASSESSMENT_CHECKS = {
     "Architecture": "Source and target CPU architecture match.",
     "MemoryCapacity": "The selected target preserves source memory capacity.",
     "LocalDisk": "Local-disk capacity, persistence assumptions and performance; known removal is Not met, otherwise review.",
-    "CatalogueRegion": "The target is present in the captured regional snapshot; use Live target availability for current offerability.",
+    "CatalogueRegion": "The target is present in the captured regional snapshot; use Plan > Availability & quota > Live target availability for current offerability.",
     "ZonePlacement": "Current zone compatibility and placement; zonal sources require live validation.",
     "AvailabilitySet": "Availability-set placement and resize-cluster constraints, when membership exists.",
     "ScaleSetModel": "Scale-set orchestration, upgrade policy and model-level migration, when applicable.",
@@ -1438,7 +1439,7 @@ def upgrade_path_panel(generation, lookups):
         EncryptionEvidence, '. ', ImageProvenance,
         '. ', NvmeOsHint, '. ', ManaOsHint,
         '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
-        'Use Capacity / quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
+        'Use Plan > Availability & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
@@ -2122,7 +2123,7 @@ def build(data):
                   "No target record means no assessed candidate, never a suffix-invented SKU.\n\n"
                   "Vendor and effective CPUs are Unknown if the catalogue does not supply them; "
                   "inspect the live target SKU record and product/vendor certification. "
-                  "Use **Assess > paths > Live target availability** for the selected target's "
+                  "Use **Plan > Availability & quota > Live target availability** for the selected target's "
                   "count/performance ceilings. This is not utilization-based right-sizing, "
                   "service-supported node-type certification or a region/zone/quota approval.",
                   "alternatives-intro"),
@@ -2143,17 +2144,32 @@ def build(data):
             "The same retiring resources are assessed against **independent V5, V6 and V7 targets**. "
             "No suitable catalogue match means manual selection, not a fallback to another generation. "
             "These panels distinguish observed configuration from prerequisites and **unverified guest readiness**. "
-            "They do not resize a VM or certify a migration. Export either grid for the full evidence columns.",
+            "They do not resize a VM or certify a migration. Export any grid for the full evidence columns. "
+            "Continue to **Plan > Availability & quota** to check the selected target's live access and quota.",
             "paths-intro"),
         upgrade_path_panel(5, path_lookups[5]),
         upgrade_path_panel(6, path_lookups[6]),
         upgrade_path_panel(7, path_lookups[7]),
         assessment_key(),
+    ]))
+    items.append(group_item("grp-discovery", "discovery", discovery_items()))
+    items.append(group_item("grp-quota", "quota", [
+        text_item(
+            "## Plan target availability and quota\n\n"
+            "Check three separate gates before scheduling a migration:\n\n"
+            "1. **SKU access:** inspect the exact subscription / region / zone / target SKU below. "
+            "Green means no applicable access restriction was returned, not an allocation guarantee.\n"
+            "2. **Quota headroom:** review fleet demand and regional/family limits in Capacity / quota planning below.\n"
+            "3. **Physical allocation and workload readiness:** confirm capacity, Azure Policy, service support "
+            "and workload prerequisites separately; this workbook does not reserve capacity or approve a migration.\n\n"
+            "**Independent scopes:** selecting a live target combination does not filter the fleet quota "
+            "calculation or change its target scenario. Choose the matching V5/V6/V7 quota scenario explicitly. "
+            "Quota Planning scope can include all readable tenant subscriptions; the live target list uses "
+            "the workbook's selected subscriptions.",
+            "planning-availability-intro"),
     ] + eligibility_items(base_query(
         sku_map, tgt_regions, region_ids, include_optional=False, use_lookup_parameters=True,
-        include_placement_zones=True))))
-    items.append(group_item("grp-discovery", "discovery", discovery_items()))
-    items.append(group_item("grp-quota", "quota", quota_planning_items(base)))
+        include_placement_zones=True)) + quota_planning_items(base)))
 
     # ---------------- TAB 1: Overview ----------------
     ov = []

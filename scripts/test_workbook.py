@@ -372,10 +372,28 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertNotIn("{LifecycleFilter}", source)
 
     def test_live_selection_explanation_is_downstream_of_row_exports(self):
-        items = find_item(self.workbook, "grp-paths")["content"]["items"]
+        planning = find_item(self.workbook, "stage-planning")
+        assess = find_item(self.workbook, "stage-assess")
+        self.assertIn("eligibility-live", {item["name"] for item in walk_items(planning["content"]["items"])})
+        self.assertNotIn("eligibility-live", {item["name"] for item in walk_items(assess["content"]["items"])})
+        items = find_item(self.workbook, "grp-quota")["content"]["items"]
         names = [item["name"] for item in items]
+        self.assertLess(names.index("planning-availability-intro"), names.index("eligibility-parameters"))
+        self.assertLess(names.index("eligibility-parameters"), names.index("eligibility-sources"))
         self.assertLess(names.index("eligibility-sources"), names.index("eligibility-selection"))
         self.assertLess(names.index("eligibility-selection"), names.index("eligibility-result"))
+        self.assertLess(names.index("eligibility-result"), names.index("quota-parameters"))
+        planning_intro = find_item(self.workbook, "planning-availability-intro")["content"]["json"]
+        self.assertIn("does not filter the fleet quota", planning_intro)
+        self.assertIn("Physical allocation and workload readiness", planning_intro)
+        quota_items = walk_items(items)
+        quota_queries = [item["content"] for item in quota_items
+                         if item.get("content", {}).get("queryType") == 1
+                         and item["name"].startswith("quota-")]
+        self.assertEqual(len(quota_queries), 4)
+        for content in quota_queries:
+            self.assertEqual(content["crossComponentResources"], ["{QuotaAllSubscriptions}"])
+            self.assertNotIn("{Live", content["query"])
         intro = find_item(self.workbook, "eligibility-intro")["content"]["json"]
         self.assertNotIn("{LiveTarget}", intro)
         self.assertIn("Live target availability", intro)
@@ -435,7 +453,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertNotIn("'TRUE'", query)
 
     def test_live_eligibility_is_exact_target_read_only_and_unknown_without_data(self):
-        group = find_item(self.workbook, "grp-paths")
+        group = find_item(self.workbook, "grp-quota")
         live = find_item(self.workbook, "eligibility-live")
         source = next(i for i in group["content"]["items"] if i["name"] == "eligibility-sources")
         request = json.loads(live["content"]["query"])
