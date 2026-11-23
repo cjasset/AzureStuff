@@ -94,7 +94,7 @@ cannot support these footer actions.
 | **Start here** | Scope, permissions, workflow map, evidence limitations and expected outputs |
 | **1. Inventory** | Fleet overview; Retirement & pricing; Workloads & owners; Catalogue coverage. Produce a scoped workload list with owners and explicit unassessed SKUs |
 | **2. Assess** | V5 / V6 / V7 paths; Routes & gates; Required actions; SQL opportunities. Produce candidate paths and a prerequisite/evidence backlog |
-| **3. Plan** | Availability & quota: live SKU/capability inspector and target-specific quota scenarios; Target specifications; Compatible alternatives; Suggested waves. Produce target-access and quota actions, pilots, dependency-aware waves and a recovery plan |
+| **3. Plan** | Live target availability; Capacity & quota; Target specifications; Compatible alternatives; Suggested waves. Produce target-access and quota actions, pilots, dependency-aware waves and a recovery plan |
 | **4. Migrate & validate** | Route-specific runbook guidance and workload-specific done criteria, plus pilot, backup/restore, rollback, application/performance/HA checks and source closeout |
 | **Methodology & references** | Recommendation policy, scoring model, sources and limitations; always accessible without advancing the workflow |
 
@@ -204,7 +204,7 @@ Observed guest OS takes precedence over image labels. Hints never mark boot,
 driver or traffic validation Met. Windows Server 2019 shared-disk NVMe compatibility
 requires separate review.
 
-In **Plan > Availability & quota > Live target availability**, choose V5/V6/V7 and select a distinct
+In **Plan > Live target availability**, choose V5/V6/V7 and select a distinct
 **subscription / region / zone / target SKU combination**, rather than a VM.
 Affected resource/instance counts show the shared scope. Regional means no zone
 was specified, not all-zone support. Multi-zone scale-set models contribute a row
@@ -226,6 +226,11 @@ red. Zone-only restrictions do not block an unzoned regional placement.
 **Green is SKU access only**, not a guarantee of quota, policy approval or
 physical allocation capacity. Support does not guarantee access or allocation.
 
+The default page shows a short purpose/legend, placement selection and access result.
+**Result detail** optionally opens **Resource capability checks**, the
+**Placement key & interpretation**, or **Advanced raw evidence**, rather than
+stacking all three on the page. Detailed procedures are linked to public documentation.
+
 **Advanced raw evidence** is opt-in. The same read-only Compute SKU response
 feeds both views: a hidden native Merge text parameter reuses the full SKU
 record, then one ARG query evaluates the restrictions. No second customer click,
@@ -233,7 +238,7 @@ new service or additional ARM SKU request is required. The record's JSON can
 arrive as an object or JSON string; both are normalized and missing data stays
 Unknown. The summary and raw evidence preserve the selected placement context.
 This inspector does not overwrite catalogue recommendations or prerequisite statuses.
-Per-resource quota prerequisites remain Unknown: use the quota section below the inspector and its
+Per-resource quota prerequisites remain Unknown: use **Plan > Capacity & quota** and its
 matching Default V5-first, V5-only, V6-only or V7-only scenario. A missing compatible
 target stays Unknown instead of falling back to another generation. Scenario
 selection changes quota modelling only, not the Inventory recommendation.
@@ -357,12 +362,16 @@ by the separate quota-planning assessment.
 
 ### Capacity / quota
 
-Open **Plan > Availability & quota** to inspect live SKU access first and quota
-headroom next. Physical allocation capacity and workload readiness are separate
+Open **Plan > Live target availability** for SKU access and the separate
+**Plan > Capacity & quota** report for fleet quota headroom.
+Physical allocation capacity and workload readiness are separate
 gates: neither green access nor sufficient quota guarantees allocation or migration success.
 The live target combination does **not** filter fleet quota demand or change its
 target scenario. Its list uses the workbook's selected subscriptions; quota's
 **Planning scope** can independently include all readable tenant subscriptions.
+Both pages keep their essential caveats visible. Quota's **Show detail** opens
+one optional breakdown, shortfall/headroom table or **Column key & assumptions**;
+the long key is hidden in the default summary view.
 
 The default view has only **five visible columns**, with a total followed by
 one row per subscription:

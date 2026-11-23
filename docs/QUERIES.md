@@ -1866,7 +1866,7 @@ resources
         EncryptionEvidence, '. ', ImageProvenance,
         '. ', NvmeOsHint, '. ', ManaOsHint,
         '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
-        'Use Plan > Availability & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
+        'Use Plan > Capacity & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
@@ -2117,7 +2117,7 @@ resources
         EncryptionEvidence, '. ', ImageProvenance,
         '. ', NvmeOsHint, '. ', ManaOsHint,
         '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
-        'Use Plan > Availability & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
+        'Use Plan > Capacity & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
@@ -2415,7 +2415,7 @@ resources
         not(RegionalPlacement) and AdvertisedZoneEntries == 0, 'The selected zone is not advertised by this SKU record; access cannot be confirmed.',
         'No applicable region or zone access restriction was returned.')
 | extend NextStep = case(
-        AccessStatus == 'Restricted' and QuotaBlocks > 0, 'Request a quota increase for this SKU/family and region; see Capacity & quota.',
+        AccessStatus == 'Restricted' and QuotaBlocks > 0, 'Request a quota increase for this SKU/family and region; see Plan > Capacity & quota.',
         AccessStatus == 'Restricted', 'Open a region/zone access support request for this subscription, target SKU and placement.',
         AccessStatus == 'Not restricted', 'No access ticket indicated. Continue with quota, policy and migration checks.',
         'Retry the check and verify permissions/placement. If unresolved, contact Azure support; do not treat this as clear.'),
@@ -4710,7 +4710,7 @@ resources
         EncryptionEvidence, '. ', ImageProvenance,
         '. ', NvmeOsHint, '. ', ManaOsHint,
         '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
-        'Use Plan > Availability & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
+        'Use Plan > Capacity & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),

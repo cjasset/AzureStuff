@@ -901,7 +901,8 @@ def quota_planning_items(base):
              [("sidebyside", "Side-by-side (keep sources)"), ("inplace", "In-place (validate allocation)")]),
             ("QuotaDetails", "Show detail", "none",
              [("none", "Summary only"), ("migration", "Migration breakdown"),
-              ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion")]),
+              ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion"),
+              ("key", "Column key & assumptions")]),
             ("QuotaGeneration", "Target scenario", "default",
              [("default", "Default V5-first"), ("5", "V5 only"), ("6", "V6 only"), ("7", "V7 only")]),
         )
@@ -913,11 +914,24 @@ def quota_planning_items(base):
         "value": ["value::all"],
     })
     return [
+        text_item(
+            "## Capacity & quota\n\n"
+            "Estimate retirement/EOL migration cores and check every affected subscription / region / target family.\n\n"
+            "**Current cores** = configured source quota-vCPUs, including deallocated inventory; "
+            "**Target cores** = selected scenario's quota-vCPUs; **Delta** = target minus current, not the quota request.\n\n"
+            "**Red:** insufficient quota. **Amber:** incomplete evidence or unverified in-place allocation. "
+            "**Green:** quota headroom only, not physical capacity or migration approval. "
+            "Missing targets stay Unknown; spare quota elsewhere cannot cancel a shortfall.\n\n"
+            "Choose the matching target scenario and migration approach. This fleet calculation is independent "
+            "of the Live target availability selection. Use **Show detail** for shortfalls, tenant headroom or the key.\n\n"
+            "**Next:** resolve access/quota actions, then confirm physical allocation, service limits and workload readiness.",
+            "quota-intro"),
         {"type": 9, "name": "quota-parameters", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills",
             "parameters": [dict(p, version="KqlParameterItem/1.0") for p in parameters]}},
-        text_item(
-            "## Capacity / quota planning\n\n"
+        summary, demand, checks, headroom,
+        conditional_text("quota-key", "QuotaDetails", "key",
+            "### Column key & assumptions\n\n"
             "A compact total plus one row per subscription. Change **Planning scope** to compare selected "
             "subscriptions with all subscriptions you can read in the current tenant. The tenant view "
             "cannot include subscriptions hidden by permissions. Other workbook tabs retain their original scope.\n\n"
@@ -945,9 +959,9 @@ def quota_planning_items(base):
             "and actual allocation still require validation. Targets use captured SKU `vCPUs`, not constrained "
             "`vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand. "
             "The scenario does not change Inventory recommendations or approve a path. "
-            "Service quotas, autoscaler maxima, surge and Batch demand require separate planning.",
-            "quota-intro"),
-        summary, demand, checks, headroom,
+            "Service quotas, autoscaler maxima, surge and Batch demand require separate planning. "
+            "For request procedures, see [VM vCPU quotas]"
+            "(https://learn.microsoft.com/azure/quotas/per-vm-quota-requests)."),
     ]
 
 
@@ -1088,7 +1102,8 @@ WORKFLOW_REPORTS = {
         ("V5 / V6 / V7 paths", "paths"), ("Routes & gates", "routes"), ("Required actions", "prereq"),
         ("SQL opportunities", "sql")]),
     "planning": ("PlanView", [
-        ("Availability & quota", "quota"), ("Target specifications", "mapping"),
+        ("Live target availability", "availability"), ("Capacity & quota", "quota"),
+        ("Target specifications", "mapping"),
         ("Compatible alternatives", "alternatives"), ("Suggested waves", "plan")]),
 }
 WORKFLOW_GUIDANCE = {
@@ -1125,9 +1140,9 @@ WORKFLOW_GUIDANCE = {
     "planning": (
         "3. Plan - what resources and sequencing will I need?",
         "Create a feasible, owner-approved plan for target availability, quota, remediation, pilots and waves.",
-        "Check the selected target's live subscription/region/zone access, then compare side-by-side "
-        "and in-place demand and check every subscription/region/family quota constraint. "
-        "review target specifications, and adapt suggested waves to application dependencies.",
+        "Use Live target availability for the selected target's subscription/region/zone access. "
+        "Use Capacity & quota for fleet demand and regional/family limits. Review target specifications "
+        "and adapt suggested waves to application dependencies.",
         "Confirm target eligibility and actual capacity separately, request quota where needed, "
         "schedule prerequisite work, and agree pilot, downtime, backup and rollback plans.",
         "An execution plan. Quota headroom is not physical capacity or transferable quota; the "
@@ -1312,7 +1327,7 @@ ASSESSMENT_CHECKS = {
     "Architecture": "Source and target CPU architecture match.",
     "MemoryCapacity": "The selected target preserves source memory capacity.",
     "LocalDisk": "Local-disk capacity, persistence assumptions and performance; known removal is Not met, otherwise review.",
-    "CatalogueRegion": "The target is present in the captured regional snapshot; use Plan > Availability & quota > Live target availability for current offerability.",
+    "CatalogueRegion": "The target is present in the captured regional snapshot; use Plan > Live target availability for current offerability.",
     "ZonePlacement": "Current zone compatibility and placement; zonal sources require live validation.",
     "AvailabilitySet": "Availability-set placement and resize-cluster constraints, when membership exists.",
     "ScaleSetModel": "Scale-set orchestration, upgrade policy and model-level migration, when applicable.",
@@ -1439,7 +1454,7 @@ def upgrade_path_panel(generation, lookups):
         EncryptionEvidence, '. ', ImageProvenance,
         '. ', NvmeOsHint, '. ', ManaOsHint,
         '. Unverified: MANA/traffic, target policy/capacity, storage IOPS/NIC limits, application/rollback. ',
-        'Use Plan > Availability & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
+        'Use Plan > Capacity & quota with the matching target scenario; the default V5-first result is not a V6/V7-path quota approval.',
         iff(WarnCodes has 'l', ' Target local-disk capacity unknown: confirm before choosing this target.', ''))
 | extend Resource = strcat(Name, ' [', VmSize, ']'),
          Target = iff(isempty(RecommendedTarget), 'Manual selection required', RecommendedTarget),
@@ -1764,7 +1779,7 @@ def live_access_query():
         not(RegionalPlacement) and AdvertisedZoneEntries == 0, 'The selected zone is not advertised by this SKU record; access cannot be confirmed.',
         'No applicable region or zone access restriction was returned.')
 | extend NextStep = case(
-        AccessStatus == 'Restricted' and QuotaBlocks > 0, 'Request a quota increase for this SKU/family and region; see Capacity & quota.',
+        AccessStatus == 'Restricted' and QuotaBlocks > 0, 'Request a quota increase for this SKU/family and region; see Plan > Capacity & quota.',
         AccessStatus == 'Restricted', 'Open a region/zone access support request for this subscription, target SKU and placement.',
         AccessStatus == 'Not restricted', 'No access ticket indicated. Continue with quota, policy and migration checks.',
         'Retry the check and verify permissions/placement. If unresolved, contact Azure support; do not treat this as clear.'),
@@ -1867,33 +1882,17 @@ def eligibility_items(base):
     }
     return [
         text_item(
-            "## Live target availability - SKU support and restrictions\n\n"
-            "Choose a path, then **select a placement combination**, not an individual VM. "
-            "Each row groups the exact **subscription / region / zone / target SKU** shared by "
-            "affected resources. This read-only Compute SKU check inspects subscription-specific "
-            "SKU offerability, advertised regions/zones and restriction records. It does not "
-            "attempt an allocation or promise physical capacity. "
-            "A missing target or failed API request is **Unknown**, "
-            "not an unsupported SKU or a passed check. No row means no eligibility evidence.\n\n"
-            "**Green - Not restricted:** no applicable SKU region/zone access restriction was returned. "
-            "No access ticket is indicated; continue with quota, policy and migration checks.\n\n"
-            "**Red - Restricted:** access is restricted for this subscription and selected placement. "
-            "Use **Open support request** to request region/zone access, including the subscription, "
-            "target SKU, region and zone shown below. A quota-coded restriction instead needs a quota increase.\n\n"
-            "**Amber - Unknown:** the check failed, evidence is incomplete, or the placement is not "
-            "advertised. Retry/verify permissions and placement; never treat Unknown as green. "
-            "A restriction for another zone or region does not make this placement red. "
-            "Choose **Advanced raw evidence** only when troubleshooting; customers do not need to "
-            "interpret JSON. Clear/reselect a combination after changing the path.\n\n"
-            "**Placement key:** Regional means no zone was specified; it does not mean every zone "
-            "is supported. A multi-zone scale-set model contributes a combination for each declared "
-            "zone; its resources repeat across those rows and its per-zone instance count stays "
-            "Unknown (blank). Missing/invalid model capacity also keeps the combination's instance "
-            "count Unknown, never zero. Do not sum those rows as fleet capacity. "
-            "Missing targets need manual selection.\n\n"
+            "## Live target availability\n\n"
+            "Choose a path and **select a subscription / region / zone / target SKU combination** "
+            "to check current subscription-specific SKU access. Reselect after changing the path.\n\n"
+            "**Green - Not restricted:** no applicable access restriction returned. "
+            "**Red - Restricted:** follow the result's support/quota action. "
+            "**Amber - Unknown:** incomplete, failed or unadvertised evidence; never a pass. "
+            "No row means no eligibility evidence.\n\n"
             "**Green is SKU access only**, not a quota, Azure Policy, physical-capacity or migration "
-            "approval. This inspector does not change the captured catalogue, "
-            "recommendations or prerequisite statuses.",
+            "approval. Use **Result detail** for capabilities, the placement key or raw evidence.\n\n"
+            "**Next:** open **Plan > Capacity & quota** and choose the matching target scenario. "
+            "This placement selection does not filter fleet quota demand or change recommendations.",
             "eligibility-intro"),
         {"type": 9, "name": "eligibility-parameters", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [{
@@ -1903,10 +1902,28 @@ def eligibility_items(base):
                 {"version": "KqlParameterItem/1.0", "name": "LiveEvidence", "type": 2,
                  "label": "Result detail", "isRequired": True, "value": "summary",
                  "jsonData": json.dumps([{"value": "summary", "label": "Customer summary"},
+                                         {"value": "capabilities", "label": "Resource capability checks"},
+                                         {"value": "key", "label": "Placement key & interpretation"},
                                          {"value": "raw", "label": "Advanced raw evidence"}])}]
             + [{"version": "KqlParameterItem/1.0", "name": name, "type": 1,
                 "value": "", "isHiddenWhenLocked": True}
                for name in ("LiveSubscription", "LiveRegion", "LiveTarget", "LiveZone")]}},
+        conditional_text("eligibility-key", "LiveEvidence", "key",
+            "### Placement key & interpretation\n\n"
+            "**Scope:** each row groups affected resources in the workbook's selected subscriptions "
+            "by subscription / region / zone / target SKU. **Regional** means no zone specified, "
+            "not support in every zone. Multi-zone scale-set resources repeat across zone rows; "
+            "their per-zone instance counts stay Unknown (blank). Missing/invalid model capacity also "
+            "keeps the combination's count Unknown. Do not sum these rows as fleet capacity.\n\n"
+            "**Restricted:** use the result's support link with the displayed placement. "
+            "A quota-coded restriction needs a quota increase instead of a region/zone access request. "
+            "Restrictions for other regions/zones do not block this placement. "
+            "**Unknown:** retry and verify permissions/placement; a missing target requires manual selection.\n\n"
+            "The same read-only Compute SKU response feeds the summary, optional capability checks "
+            "and raw evidence. It does not attempt allocation, reserve capacity or update catalogue "
+            "recommendations/prerequisite statuses. "
+            "See [SKU availability and restrictions]"
+            "(https://learn.microsoft.com/rest/api/compute/resource-skus/list) for API details."),
         source,
         text_item(
             "Current selection: target **{LiveTarget}**, subscription **{LiveSubscription}**, "
@@ -1919,21 +1936,17 @@ def eligibility_items(base):
              {"type": 9, "name": "eligibility-record-parameter", "content": {
                  "version": "KqlParameterItem/1.0", "style": "pills", "parameters": [record_parameter]}},
              summary,
+             {"type": 12, "name": "eligibility-capabilities", "conditionalVisibility": {
+                 "parameterName": "LiveEvidence", "comparison": "isEqualTo", "value": "capabilities"},
+              "content": {"version": "NotebookGroup/1.0", "groupType": "editable", "items": [
              text_item(
                  "### Per-resource target capability details\n\n"
-                 "Uses the same full live SKU record. Counts are attached/model configuration, "
-                 "not guest workload measurements. VMSS instance counts/visibility stay Unknown. "
-                 "Select **Details** for limits, effective versus quota CPUs, cached/uncached "
-                 "storage ceilings and placement dependencies. Blank means not supplied/Unknown. "
-                 "Provisioned disk totals include OS and data disks only when every attached "
-                 "managed disk has indexed values; these are **ceilings, not observed demand**. "
-                 "Cached and uncached paths are different limits, not additive capacity. "
-                 "Validate cache modes, disk tier/burst/VM limits, NIC bandwidth and actual "
-                 "application baseline. Count-only green checks are not performance approval. "
-                 "CPU architecture is not CPU vendor; missing manufacturer remains Unknown. "
-                 "Effective vCPUs can be constrained; quota uses `vCPUs`, not `vCPUsAvailable`. "
-                 "This table groups resources by the selected subscription/region/target and "
-                 "does not approve their zone, PPG, host or reservation placement.",
+                 "Attached/model counts are not guest measurements; VMSS instance visibility stays Unknown. "
+                 "Disk totals require complete indexed disk evidence: **ceilings, not observed demand**. "
+                 "Cached/uncached limits are **not additive**. Quota uses `vCPUs`, not constrained "
+                 "`vCPUsAvailable`; CPU architecture is not manufacturer. Blank means Unknown. "
+                 "Select **Details** for limits and placement evidence. Count checks do not approve "
+                 "performance, zone/PPG/host/reservation placement or application readiness.",
                  "eligibility-fit-intro"),
              arg_query(target_fit_query(compute_evidence_query(filter_workload=False)) + "\n| extend Details = 'Details'",
                        "eligibility-fit", size=1, export=True,
@@ -1949,6 +1962,7 @@ def eligibility_items(base):
                                "CpuArchitecture", "CpuVendor", "ProvisionedDiskIops", "ProvisionedDiskMBps",
                                "TargetUncachedIops", "TargetUncachedMBps", "TargetCachedIops", "TargetCachedMBps",
                                "Placement", "PerformanceCheck", "CheckedAt")], filter=True)),
+              ]}},
          ]}},
     ]
 
@@ -2123,7 +2137,7 @@ def build(data):
                   "No target record means no assessed candidate, never a suffix-invented SKU.\n\n"
                   "Vendor and effective CPUs are Unknown if the catalogue does not supply them; "
                   "inspect the live target SKU record and product/vendor certification. "
-                  "Use **Plan > Availability & quota > Live target availability** for the selected target's "
+                  "Use **Plan > Live target availability** for the selected target's "
                   "count/performance ceilings. This is not utilization-based right-sizing, "
                   "service-supported node-type certification or a region/zone/quota approval.",
                   "alternatives-intro"),
@@ -2145,7 +2159,7 @@ def build(data):
             "No suitable catalogue match means manual selection, not a fallback to another generation. "
             "These panels distinguish observed configuration from prerequisites and **unverified guest readiness**. "
             "They do not resize a VM or certify a migration. Export any grid for the full evidence columns. "
-            "Continue to **Plan > Availability & quota** to check the selected target's live access and quota.",
+            "Continue to **Plan > Live target availability**, then **Capacity & quota**.",
             "paths-intro"),
         upgrade_path_panel(5, path_lookups[5]),
         upgrade_path_panel(6, path_lookups[6]),
@@ -2153,23 +2167,10 @@ def build(data):
         assessment_key(),
     ]))
     items.append(group_item("grp-discovery", "discovery", discovery_items()))
-    items.append(group_item("grp-quota", "quota", [
-        text_item(
-            "## Plan target availability and quota\n\n"
-            "Check three separate gates before scheduling a migration:\n\n"
-            "1. **SKU access:** inspect the exact subscription / region / zone / target SKU below. "
-            "Green means no applicable access restriction was returned, not an allocation guarantee.\n"
-            "2. **Quota headroom:** review fleet demand and regional/family limits in Capacity / quota planning below.\n"
-            "3. **Physical allocation and workload readiness:** confirm capacity, Azure Policy, service support "
-            "and workload prerequisites separately; this workbook does not reserve capacity or approve a migration.\n\n"
-            "**Independent scopes:** selecting a live target combination does not filter the fleet quota "
-            "calculation or change its target scenario. Choose the matching V5/V6/V7 quota scenario explicitly. "
-            "Quota Planning scope can include all readable tenant subscriptions; the live target list uses "
-            "the workbook's selected subscriptions.",
-            "planning-availability-intro"),
-    ] + eligibility_items(base_query(
+    items.append(group_item("grp-availability", "availability", eligibility_items(base_query(
         sku_map, tgt_regions, region_ids, include_optional=False, use_lookup_parameters=True,
-        include_placement_zones=True)) + quota_planning_items(base)))
+        include_placement_zones=True))))
+    items.append(group_item("grp-quota", "quota", quota_planning_items(base)))
 
     # ---------------- TAB 1: Overview ----------------
     ov = []

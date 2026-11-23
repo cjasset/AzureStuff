@@ -62,7 +62,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         expected = {
             "inventory": ("InventoryView", ["overview", "impacted", "discovery", "coverage"]),
             "assess": ("AssessView", ["paths", "routes", "prereq", "sql"]),
-            "planning": ("PlanView", ["quota", "mapping", "alternatives", "plan"]),
+            "planning": ("PlanView", ["availability", "quota", "mapping", "alternatives", "plan"]),
         }
         parameters = {p["name"]: p for p in find_item(self.workbook, "parameters")["content"]["parameters"]}
         for stage, (parameter, keys) in expected.items():
@@ -376,18 +376,17 @@ class WorkbookDeploymentTests(unittest.TestCase):
         assess = find_item(self.workbook, "stage-assess")
         self.assertIn("eligibility-live", {item["name"] for item in walk_items(planning["content"]["items"])})
         self.assertNotIn("eligibility-live", {item["name"] for item in walk_items(assess["content"]["items"])})
-        items = find_item(self.workbook, "grp-quota")["content"]["items"]
+        items = find_item(self.workbook, "grp-availability")["content"]["items"]
+        availability_names = {item["name"] for item in walk_items(items)}
+        quota_items = find_item(self.workbook, "grp-quota")["content"]["items"]
+        quota_names = {item["name"] for item in walk_items(quota_items)}
+        self.assertNotIn("quota-parameters", availability_names)
+        self.assertFalse(any(name.startswith("eligibility-") for name in quota_names))
         names = [item["name"] for item in items]
-        self.assertLess(names.index("planning-availability-intro"), names.index("eligibility-parameters"))
         self.assertLess(names.index("eligibility-parameters"), names.index("eligibility-sources"))
         self.assertLess(names.index("eligibility-sources"), names.index("eligibility-selection"))
         self.assertLess(names.index("eligibility-selection"), names.index("eligibility-result"))
-        self.assertLess(names.index("eligibility-result"), names.index("quota-parameters"))
-        planning_intro = find_item(self.workbook, "planning-availability-intro")["content"]["json"]
-        self.assertIn("does not filter the fleet quota", planning_intro)
-        self.assertIn("Physical allocation and workload readiness", planning_intro)
-        quota_items = walk_items(items)
-        quota_queries = [item["content"] for item in quota_items
+        quota_queries = [item["content"] for item in walk_items(quota_items)
                          if item.get("content", {}).get("queryType") == 1
                          and item["name"].startswith("quota-")]
         self.assertEqual(len(quota_queries), 4)
@@ -399,6 +398,9 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("Live target availability", intro)
         self.assertIn("**Green is SKU access only**", intro)
         self.assertIn("not a quota, Azure Policy, physical-capacity or migration", intro)
+        self.assertIn("does not filter fleet quota demand", intro)
+        self.assertLessEqual(len(intro.split()), 160)
+        self.assertLessEqual(len(find_item(self.workbook, "quota-intro")["content"]["json"].split()), 160)
 
     def test_platform_score_is_not_migration_approval(self):
         queries = []
@@ -453,7 +455,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertNotIn("'TRUE'", query)
 
     def test_live_eligibility_is_exact_target_read_only_and_unknown_without_data(self):
-        group = find_item(self.workbook, "grp-quota")
+        group = find_item(self.workbook, "grp-availability")
         live = find_item(self.workbook, "eligibility-live")
         source = next(i for i in group["content"]["items"] if i["name"] == "eligibility-sources")
         request = json.loads(live["content"]["query"])
@@ -480,7 +482,12 @@ class WorkbookDeploymentTests(unittest.TestCase):
         result = find_item(self.workbook, "eligibility-result")["content"]["items"]
         self.assertEqual([item["name"] for item in result],
                          ["eligibility-live", "eligibility-record-parameter", "eligibility-status",
-                          "eligibility-fit-intro", "eligibility-fit"])
+                          "eligibility-capabilities"])
+        capabilities = find_item(self.workbook, "eligibility-capabilities")
+        self.assertEqual(capabilities["conditionalVisibility"],
+                         {"parameterName": "LiveEvidence", "comparison": "isEqualTo", "value": "capabilities"})
+        self.assertEqual([item["name"] for item in capabilities["content"]["items"]],
+                         ["eligibility-fit-intro", "eligibility-fit"])
         arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
         self.assertEqual({item["name"] for item in arms}, {"eligibility-live", "discovery-batch-live"})
 
@@ -493,6 +500,11 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertTrue(content["noDataMessage"].startswith("Unknown:"))
         controls = find_item(self.workbook, "eligibility-parameters")["content"]["parameters"]
         self.assertEqual(next(p["value"] for p in controls if p["name"] == "LiveEvidence"), "summary")
+        choices = json.loads(next(p["jsonData"] for p in controls if p["name"] == "LiveEvidence"))
+        self.assertEqual({choice["value"] for choice in choices}, {"summary", "capabilities", "key", "raw"})
+        key = find_item(self.workbook, "eligibility-key")
+        self.assertEqual(key["conditionalVisibility"],
+                         {"parameterName": "LiveEvidence", "comparison": "isEqualTo", "value": "key"})
         self.assertEqual(find_item(self.workbook, "eligibility-live")["conditionalVisibility"]["value"], "raw")
 
     def test_access_classifier_preserves_placement_scope_unknowns_and_quota_actions(self):
@@ -707,6 +719,13 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual(colors["formatOptions"]["thresholdsGrid"][0]["representation"], "red")
         for name in ("quota-demand", "quota-check", "quota-headroom"):
             self.assertEqual(queries[name]["conditionalVisibility"]["parameterName"], "QuotaDetails")
+        key = find_item(self.workbook, "quota-key")
+        self.assertEqual(key["conditionalVisibility"],
+                         {"parameterName": "QuotaDetails", "comparison": "isEqualTo", "value": "key"})
+        controls = find_item(self.workbook, "quota-parameters")["content"]["parameters"]
+        detail = next(p for p in controls if p["name"] == "QuotaDetails")
+        self.assertEqual(detail["value"], "none")
+        self.assertIn("key", {choice["value"] for choice in json.loads(detail["jsonData"])})
 
     def test_quota_headroom_is_not_pooled_with_migration_checks(self):
         self.assertIn("Counts['cores']", builder.quota_headroom_query("resources"))
