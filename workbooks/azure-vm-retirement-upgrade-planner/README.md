@@ -483,9 +483,38 @@ remain red even if other checks are unknown.
   unused quota **now**, not surplus after their planned migrations.
 
 Headroom is a discussion lead, **not a shared pool**. The optional **Live
-quota-group inspector** separately discovers readable management groups and their
-quota groups using native ARM APIs. Select one group, subscription, region and
-quota metric; this is a guided inspection, **not an automatic tenant-wide scan**.
+quota-group inspector** uses an imported discovery list, avoiding management-group
+hunting. Run the read-only [Find-QuotaGroups.ps1](scripts/Find-QuotaGroups.ps1)
+with Azure CLI installed and signed in to the intended tenant (`az login --tenant <tenant-id>`):
+
+```powershell
+.\scripts\Find-QuotaGroups.ps1 -OutputPath .\quota-group-discovery.json
+Get-Content .\quota-group-discovery.json -Raw | Set-Clipboard
+```
+
+Paste the **complete JSON** into **Paste discovery JSON**, then select a
+**Discovered quota group**, subscription, region and metric. A single discovered
+group is selected automatically. The script scans every enumerated readable
+management group, follows management-group and quota-group pagination, deduplicates
+IDs, and retries throttling/transient service errors up to three attempts.
+It uses Azure CLI's authenticated read-only ARM GET requests because the quota
+CLI extension does not expose group discovery. It currently targets Azure public
+cloud. It never obtains or writes credentials to the report.
+
+Discovery is a **timestamped snapshot**; rerun and paste again to refresh. Status,
+scope counts and `failedScopes` disclose coverage. An incomplete scan writes its
+partial report, warns and exits with an error; a successful empty scan means no
+groups were returned for the readable scopes, not that none exist in the tenant.
+Unreadable management groups remain outside discovery coverage. Malformed responses,
+unexpected group scope and unsafe/repeated pagination links are not accepted.
+No customer discovery data is bundled in the portable workbook or published source.
+
+The workbook itself needs **no script at runtime and no supporting service**.
+The script performs the cross-management-group loop; native ARM `GETARRAY`
+pagination is not a dynamic loop over different management-group endpoints.
+Only discovery is imported; selected membership and regional pool data are still
+fetched live through native ARM queries. Live evidence is **one selected scope,
+not an automatic tenant-wide quota assessment**.
 It is independent of fleet scope and target scenario. Membership comes from the
 quota-group API, never management-group ancestry.
 
@@ -493,7 +522,7 @@ Separate columns show verified membership, group limit, **unallocated group
 cores**, quota already allocated to the selected subscription and the next action.
 An unallocated pool must be allocated first; it never turns a subscription
 shortfall green. Already allocated quota is not added to subscription limits again.
-Discovery lists follow standard API pagination. Missing, invalid, duplicate,
+Missing, invalid, duplicate,
 pending or mismatched evidence stays Unknown; nested pool/allocation continuation
 pages also remain Unknown rather than claiming complete coverage. Empty lists or
 access errors do not establish that no group exists. Raw evidence is opt-in.
@@ -504,11 +533,13 @@ changes membership, moves quota or requests increases. See
 Quota-group read permissions are inherited from the owning management group;
 subscription Reader access alone does not establish access to that group.
 
-Select **Readable management group** first, then **Quota group**. Lists can take
-a few seconds to load; a required-but-empty selection is not evidence that no
-management group exists. Both dropdowns project `id`/`name` from the array-root
-rows returned by native `GETARRAY`, not the REST response's `value` envelope.
-Validation covers that binding and paged/empty list shapes as well as direct API access.
+The imported picker reads the report's `groups` array. Do not paste only a group
+ID or the raw ARM page envelope. Empty/invalid JSON does not establish absence.
+Live results may take a few seconds to load. KQL uses documented `escapejson`
+formatting inside quoted string literals, then parses the record text; empty
+responses cannot expand to invalid `dynamic()` expressions or unquoted IDs.
+Validation executes the complete production header with empty, object,
+JSON-encoded and escaped record text, plus paged/empty/partial discovery cases.
 
 Missing CPU/family metadata, missing quota, or Spot workloads keep the relevant
 estimate **Unknown**, not unlimited or zero shortfall. Duplicate quota metrics are

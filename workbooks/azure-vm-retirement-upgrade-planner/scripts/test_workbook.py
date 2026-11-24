@@ -59,6 +59,9 @@ class WorkbookDeploymentTests(unittest.TestCase):
         for item in walk_items(self.workbook["items"]):
             for parameter in item.get("content", {}).get("parameters", []):
                 if "jsonData" in parameter:
+                    if parameter["name"] == "QuotaGroupId":
+                        self.assertEqual(parameter["jsonData"], "{QuotaGroupDiscovery:$.groups}")
+                        continue
                     self.assertEqual(parameter["jsonData"], json.dumps(
                         json.loads(parameter["jsonData"]), separators=(",", ":")))
 

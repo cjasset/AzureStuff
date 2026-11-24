@@ -5,11 +5,6 @@ import uuid
 
 API_VERSION = "2025-09-01"
 ENDPOINTS = {
-    "QuotaGroupManagementGroup": (
-        "GETARRAY", "/providers/Microsoft.Management/managementGroups?api-version=2020-05-01"),
-    "QuotaGroupId": (
-        "GETARRAY", "{QuotaGroupManagementGroup}/providers/Microsoft.Quota/groupQuotas"
-        f"?api-version={API_VERSION}"),
     "group-quota-membership": (
         "GET", "{QuotaGroupId}/subscriptions/{QuotaGroupSubscription}"
         f"?api-version={API_VERSION}"),
@@ -48,11 +43,11 @@ def evidence_query():
     return """resourcecontainers
 | take 1
 | summarize Seed=count()
-| project Member=dynamic({QuotaGroupMemberRecord:json}), Pool=dynamic({QuotaGroupPoolRecord:json}),
-    SelectedGroup=tostring(dynamic({QuotaGroupId:json})),
-    SelectedSubscription=tolower(tostring(dynamic({QuotaGroupSubscription:json}))),
-    SelectedRegion=tolower(tostring(dynamic({QuotaGroupRegion:json}))),
-    SelectedMetric=tolower(tostring(dynamic({QuotaGroupMetric:json})))
+| project Member=parse_json("{QuotaGroupMemberRecord:escapejson}"), Pool=parse_json("{QuotaGroupPoolRecord:escapejson}"),
+    SelectedGroup="{QuotaGroupId:escapejson}",
+    SelectedSubscription=tolower("{QuotaGroupSubscription:escapejson}"),
+    SelectedRegion=tolower("{QuotaGroupRegion:escapejson}"),
+    SelectedMetric=tolower("{QuotaGroupMetric:escapejson}")
 | extend Member=iff(gettype(Member) == 'string', parse_json(tostring(Member)), Member),
          Pool=iff(gettype(Pool) == 'string', parse_json(tostring(Pool)), Pool)
 | extend ExpectedMember=tolower(strcat(SelectedGroup, '/subscriptions/', SelectedSubscription)),

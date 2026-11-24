@@ -979,15 +979,15 @@ def quota_planning_items(base, regions, families):
 
 
 def quota_group_items(regions, families):
-    parameters = []
-    for name, label in (("QuotaGroupManagementGroup", "Readable management group"),
-                        ("QuotaGroupId", "Quota group")):
-        parameters.append({
-            "version": "KqlParameterItem/1.0", "name": name, "label": label,
-            "type": 2, "isRequired": True, "queryType": 12,
-            "query": group_arm_request(name, [("value", "$.id"), ("label", "$.name")]),
-            "typeSettings": {"showDefault": False},
-        })
+    parameters = [{
+        "version": "KqlParameterItem/1.0", "name": "QuotaGroupDiscovery",
+        "label": "Paste discovery JSON", "type": 1,
+        "value": '{"status":"Not scanned","checkedAtUtc":"","groups":[]}',
+    }, {
+        "version": "KqlParameterItem/1.0", "name": "QuotaGroupId", "label": "Discovered quota group",
+        "type": 2, "isRequired": True, "jsonData": "{QuotaGroupDiscovery:$.groups}",
+        "typeSettings": {"showDefault": False},
+    }]
     parameters.append({
         "version": "KqlParameterItem/1.0", "name": "QuotaGroupSubscription", "type": 6,
         "label": "Subscription to inspect", "isRequired": True,
@@ -1012,20 +1012,25 @@ def quota_group_items(regions, families):
     items = [
         text_item(
             "### Live quota-group inspector\n\n"
-            "Select a management group, quota group, subscription, region and metric. "
-            "Discovery follows API pages. "
-            "**One selected scope, not a tenant-wide scan**; independent of fleet filters/scenarios. "
-            "Empty lists/API errors do not prove no group exists.\n\n"
+            "Run the optional read-only [discovery script]"
+            "(https://github.com/cjasset/AzureStuff/blob/main/workbooks/azure-vm-retirement-upgrade-planner/scripts/Find-QuotaGroups.ps1), "
+            "paste its JSON below, then select a discovered group, subscription, region and metric. "
+            "Discovery is a timestamped snapshot, not live; rerun to refresh. "
+            "Incomplete scans list failed scopes in the JSON; empty lists do not prove no group exists.\n\n"
+            "**Live evidence: one selected scope, not a tenant-wide scan**; independent of fleet filters/scenarios. "
             "API membership is **not inferred from management-group ancestry**. "
             "Allocate pool quota first, then refresh family and regional subscription checks. "
             "Already allocated quota is not added again. "
             "Pool/allocation continuation pages stay Unknown; review Azure Quotas for full coverage. "
-            "Donor shareable quota, subscription eligibility and physical capacity are not assessed. "
+            "Donor shareable quota, eligibility and capacity are not assessed. "
             "No group, membership or quota is changed. "
             "[Quota-group guidance](https://learn.microsoft.com/azure/quotas/quota-groups).",
             "group-quota-intro"),
         {"type": 9, "name": "group-quota-controls", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills", "parameters": parameters}},
+        text_item("Discovery status: **{QuotaGroupDiscovery:$.status}**; scanned UTC: "
+                  "**{QuotaGroupDiscovery:$.checkedAtUtc}**. Snapshot only; membership/pool evidence below is live.",
+                  "group-quota-discovery-status"),
     ]
     for name, parameter in (("group-quota-membership", "QuotaGroupMemberRecord"),
                             ("group-quota-pool", "QuotaGroupPoolRecord")):
@@ -3134,7 +3139,7 @@ def build(data):
             item["customWidth"] = "100"
         content = item.get("content", {})
         for record in [content, *content.get("parameters", [])]:
-            if "jsonData" in record:
+            if "jsonData" in record and record["jsonData"] != "{QuotaGroupDiscovery:$.groups}":
                 record["jsonData"] = json.dumps(json.loads(record["jsonData"]), separators=(",", ":"))
             if record.get("queryType") in (7, 12) and "query" in record:
                 record["query"] = json.dumps(json.loads(record["query"]), separators=(",", ":"))

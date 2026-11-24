@@ -23,16 +23,11 @@ class QuotaGroupEvidenceTests(unittest.TestCase):
         self.assertNotIn("QuotaScope", query)
         self.assertNotIn("LifecycleFilter", query)
 
-    def test_discovery_uses_native_paged_lists(self):
-        for name in ("QuotaGroupManagementGroup", "QuotaGroupId"):
-            request = json.loads(self.parameters[name]["query"])
-            self.assertEqual((request["method"], request["path"]), groups.ENDPOINTS[name])
-            self.assertEqual(request["method"], "GETARRAY")
-            settings = request["transformers"][0]["settings"]
-            self.assertEqual(settings["tablePath"], "$")
-            self.assertEqual(settings["columns"],
-                             [{"columnid": "value", "path": "$.id"},
-                              {"columnid": "label", "path": "$.name"}])
+    def test_discovery_import_is_explicit_snapshot(self):
+        self.assertNotIn("QuotaGroupManagementGroup", self.parameters)
+        self.assertEqual(self.parameters["QuotaGroupId"]["jsonData"], "{QuotaGroupDiscovery:$.groups}")
+        self.assertEqual(json.loads(self.parameters["QuotaGroupDiscovery"]["value"])["groups"], [])
+        self.assertNotIn("queryType", self.parameters["QuotaGroupId"])
 
     def test_records_preserve_envelopes_and_native_sources(self):
         for name, source in (("QuotaGroupMemberRecord", "group-quota-membership"),
@@ -47,6 +42,10 @@ class QuotaGroupEvidenceTests(unittest.TestCase):
 
     def test_membership_is_explicit_and_scope_matched(self):
         query = groups.evidence_query()
+        self.assertNotIn(":json}", query)
+        for name in ("QuotaGroupMemberRecord", "QuotaGroupPoolRecord", "QuotaGroupId",
+                     "QuotaGroupSubscription", "QuotaGroupRegion", "QuotaGroupMetric"):
+            self.assertIn('"{' + name + ':escapejson}"', query)
         for expression in ("Member.properties.subscriptionId", "== ExpectedMember",
                            "MemberState =~ 'Succeeded'", "== ExpectedPool", "PoolState =~ 'Succeeded'"):
             self.assertIn(expression, query)
@@ -70,24 +69,14 @@ class QuotaGroupEvidenceTests(unittest.TestCase):
         self.assertIn("Already allocated quota is not added again", text)
 
     def test_new_endpoints_and_methods_are_strictly_guarded(self):
-        for name in ("QuotaGroupId", "group-quota-pool"):
+        for name in ("group-quota-membership", "group-quota-pool"):
             workbook = copy.deepcopy(self.workbook)
             items = {i["name"]: i for i in walk_items(workbook["items"])}
-            target = (next(p for p in items["group-quota-controls"]["content"]["parameters"]
-                           if p["name"] == name) if name == "QuotaGroupId" else items[name]["content"])
+            target = items[name]["content"]
             request = json.loads(target["query"])
             request["method"] = "POST"
             target["query"] = json.dumps(request)
             self.assertTrue(any("read-only" in e for e in structure_check(workbook)))
-        for name in ("QuotaGroupManagementGroup", "QuotaGroupId"):
-            workbook = copy.deepcopy(self.workbook)
-            items = {i["name"]: i for i in walk_items(workbook["items"])}
-            target = next(p for p in items["group-quota-controls"]["content"]["parameters"]
-                          if p["name"] == name)
-            request = json.loads(target["query"])
-            request["transformers"][0]["settings"]["tablePath"] = "$.value[*]"
-            target["query"] = json.dumps(request)
-            self.assertTrue(any("array-root" in e for e in structure_check(workbook)))
 
     def test_raw_evidence_is_opt_in_and_verified_is_not_green(self):
         self.assertEqual(self.parameters["QuotaGroupEvidence"]["value"], "summary")
