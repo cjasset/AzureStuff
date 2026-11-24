@@ -2,6 +2,10 @@
 
 Collection of projects and examples related to Azure.
 
+## Workbooks
+
+- [Azure VM Retirement & Upgrade Planner](workbooks/azure-vm-retirement-upgrade-planner/README.md): self-contained guided inventory, compatibility assessment, target availability, quota and migration planning. Originally based on Krishna Sunkavalli's VM retirement workbook; original MIT license and source history retained.
+
 ## Policies
 
 - [Require explicit routing models for model router deployments](Policies/Model-Router-Required-Models/README.md): require a non-empty model subset as an explicit-configuration guardrail alongside built-in approved-model governance.

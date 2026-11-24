@@ -40,12 +40,27 @@ lookups/shared queries, supporting resource dependencies and remote active
 content are rejected. Build-time Python and repository reference files are
 authoring dependencies only; customers do not install them to use the workbook.
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2FAzureStuff%2Fmain%2Fworkbooks%2Fazure-vm-retirement-upgrade-planner%2Fworkbook%2Fazuredeploy.json)
 
-## Fork policy: v5 first
+## Origins and acknowledgements
 
-This fork of [the upstream workbook](https://github.com/krishna-sunkavalli/vm-retirement-workbook)
-prefers a **catalogued, non-NVMe v5 target** for retirement remediation, rather than
+This planner originated from [Krishna Sunkavalli's VM retirement workbook](https://github.com/krishna-sunkavalli/vm-retirement-workbook).
+Thank you to Krishna for the original workbook, catalogue and target-mapping foundation.
+The original MIT license and copyright notice are preserved in [LICENSE](LICENSE).
+
+The planner is now independently maintained in
+[cjasset/AzureStuff](https://github.com/cjasset/AzureStuff/tree/main/workbooks/azure-vm-retirement-upgrade-planner).
+Its guided inventory, assessment, availability, quota, reservation and workload-specific
+planning workflow has substantially expanded beyond the original workbook. This is
+not an official Microsoft migration certification or an upstream-supported release.
+
+The complete source history, including original author commits, was imported without
+squashing into this folder. The [previous maintained fork](https://github.com/cjasset/vm-retirement-workbook)
+remains available for historical references; new development belongs here.
+
+## Target-selection policy: v5 first
+
+The planner prefers a **catalogued, non-NVMe v5 target** for retirement remediation, rather than
 defaulting directly to v6. Candidates must preserve CPU architecture, vCPU and
 memory capacity, local-disk presence/known capacity and premium-storage support. Only existing
 target records are eligible; SKU names are not invented by replacing a suffix.
@@ -657,12 +672,14 @@ artifact you can share, the Excel export per grid is the reliable path.
 
 ### Option A - Deploy to Azure (recommended)
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2Fvm-retirement-workbook%2Fmain%2Fworkbook%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fcjasset%2FAzureStuff%2Fmain%2Fworkbooks%2Fazure-vm-retirement-upgrade-planner%2Fworkbook%2Fazuredeploy.json)
 
 Pick a subscription and resource group, then **Review + create**. The workbook
 appears under **Monitor → Workbooks**.
 
 ### Option B - Azure CLI
+
+Run the following commands from this planner folder, not the AzureStuff repository root.
 
 ```bash
 az group create --name rg-vm-lifecycle --location eastus
@@ -709,6 +726,9 @@ penalty and a "Confirm VM generation" prerequisite, rather than failing.
 ---
 
 ## Rebuilding
+
+Run from `workbooks/azure-vm-retirement-upgrade-planner` within the AzureStuff checkout.
+Build outputs and embedded references remain local to this folder.
 
 ```bash
 python scripts/build_workbook.py      # regenerate workbook + ARM template

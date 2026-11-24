@@ -2167,7 +2167,7 @@ def build(data):
         "subscriptions you select, identifies which sizes are affected by announced "
         "Azure VM retirements and lifecycle changes, recommends a target size for each, "
         "and scores captured platform compatibility, not application migration readiness.\n\n"
-        "**Fork policy: v5 first.** Retirement recommendations prefer a catalogued "
+        "**Target policy: v5 first.** Retirement recommendations prefer a catalogued "
         "non-NVMe v5 target that preserves architecture, CPU, memory, local disk "
         "(including known capacity) and "
         "premium-storage support. Newer targets remain alternatives. If no suitable "
