@@ -262,6 +262,11 @@ instance count Unknown, not zero.
 
 The default result is customer-facing, not JSON:
 
+The live request and dependent summary can take a few seconds after selection.
+An initial **Unknown** may clear automatically; wait briefly before retrying.
+If it persists, verify selection and permissions rather than treating it as a pass.
+The workbook does not impose an artificial delay or hide genuine Unknown results.
+
 | SKU access | Meaning | Next action |
 | --- | --- | --- |
 | **Green - Not restricted** | The selected region/zone is advertised and no applicable access restriction was returned | No access ticket indicated; continue with quota, policy and migration checks |

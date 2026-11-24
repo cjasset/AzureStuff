@@ -528,6 +528,10 @@ class WorkbookDeploymentTests(unittest.TestCase):
 
     def test_live_eligibility_is_exact_target_read_only_and_unknown_without_data(self):
         group = find_item(self.workbook, "grp-availability")
+        intro = find_item(self.workbook, "eligibility-intro")["content"]["json"]
+        self.assertIn("access results may take a few seconds", intro)
+        self.assertIn("wait before retrying", intro)
+        self.assertIn("Persistent Unknown is not a pass", intro)
         live = find_item(self.workbook, "eligibility-live")
         source = next(i for i in group["content"]["items"] if i["name"] == "eligibility-sources")
         request = json.loads(live["content"]["query"])

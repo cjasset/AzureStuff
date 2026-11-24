@@ -1973,15 +1973,17 @@ def eligibility_items(base):
     return [
         text_item(
             "## Live target availability\n\n"
-            "Choose a path and **select a subscription / region / zone / target SKU combination** "
-            "to check current subscription-specific SKU access. Reselect after changing the path.\n\n"
-            "**Green - Not restricted:** no applicable access restriction returned. "
-            "**Red - Restricted:** follow the result's support/quota action. "
-            "**Amber - Unknown:** incomplete, failed or unadvertised evidence; never a pass. "
-            "No row means no eligibility evidence.\n\n"
-            "**Green is SKU access only**, not a quota, Azure Policy, physical-capacity or migration "
-            "approval. Use **Result detail** for capabilities, the placement key or raw evidence.\n\n"
-            "**Next:** open **Plan > Capacity & quota** and choose the matching target scenario. "
+            "**Select a subscription / region / zone / target SKU combination.** "
+            "Reselect after changing the path.\n\n"
+            "**Loading:** access results may take a few seconds; wait before retrying an initial "
+            "**Unknown**. Persistent Unknown is not a pass.\n\n"
+            "**Green - Not restricted:** no applicable access restriction. "
+            "**Red - Restricted:** follow the support/quota action. "
+            "**Amber - Unknown:** missing, failed or unadvertised evidence; never a pass. "
+            "Empty results are not a pass.\n\n"
+            "**Green is SKU access only**, not a quota, Azure Policy, physical-capacity or migration approval. "
+            "**Result detail** shows capabilities, the key or raw evidence.\n\n"
+            "**Next:** **Plan > Capacity & quota**, with the matching scenario. "
             "This placement selection does not filter fleet quota demand or change recommendations.",
             "eligibility-intro"),
         {"type": 9, "name": "eligibility-parameters", "content": {
