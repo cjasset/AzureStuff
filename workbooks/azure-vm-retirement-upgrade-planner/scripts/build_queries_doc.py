@@ -1,0 +1,261 @@
+"""Generate docs/QUERIES.md from the built workbook.
+
+Every Azure Resource Graph query the workbook runs is extracted verbatim, so
+readers can audit exactly what is executed against their tenant without opening
+the workbook JSON. The expanded lifecycle lookup literal is elided - it
+is a 84 KB machine-generated dynamic bag, not something a human reads.
+"""
+import json
+import os
+import re
+
+from build_workbook import expand_lookups
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WB = os.path.join(ROOT, "out", "azure-vm-retirement-workbook.json")
+DOCS = os.path.join(ROOT, "docs")
+
+# Human descriptions keyed by the workbook item name.
+DESCRIPTIONS = {
+    "discovery-compute": ("Workload discovery", "Compute ownership and resource evidence; NIC/disk visibility, "
+                          "SQL/SAP signals, service-specific migration methods and conservative OS hints. "
+                          "Flexible member details are not additive to model capacity."),
+    "discovery-services": ("Workload discovery", "Independent service registrations, even without backing "
+                           "compute. Host-pool, SQL, SAP and managed resource-group metadata are evidence, not runtime proof."),
+    "discovery-pools": ("Workload discovery", "Configured AKS/Batch pool sizes, autoscaler maxima, surge and "
+                        "node targets; not running-node counts or automatic additions to the Compute quota plan."),
+    "eligibility-sources": ("Upgrade paths", "One row per subscription/region/zone/exact V5 or V6 target SKU "
+                            "combination, with affected resource/instance counts. Multi-zone models expand "
+                            "to each declared zone; per-zone instance counts remain Unknown. Selection "
+                            "feeds the separate read-only live target availability inspector."),
+    "eligibility-status": ("Upgrade paths", "Customer-facing red/green/Unknown SKU access decision from "
+                           "the selected live ARM record. Applies location/zone restriction scope, "
+                           "validates advertised placement, preserves missing/ambiguous evidence as Unknown "
+                           "and distinguishes quota requests from region/zone access tickets."),
+    "quota-demand": ("Capacity / quota", "Optional source/target/delta breakdown by subscription, region "
+                     "and captured target family, respecting the planning-scope dropdown."),
+    "quota-check": ("Capacity / quota", "Automatic regional and family quota checks for every affected "
+                    "subscription/region, joined to indexed QuotaResources. Missing/duplicate data is Unknown."),
+    "quota-summary": ("Capacity / quota", "Compact tenant/selected-scope total and per-subscription "
+                      "current cores, target cores, signed delta and quota status. Regional source/target "
+                      "counts are included once; any failing constraint survives rollup."),
+    "quota-headroom": ("Capacity / quota", "Optional readable-tenant unused quota for relevant target "
+                       "regions/families, capped by regional headroom. Discussion leads, not a pooled "
+                       "quota allowance or quota-group eligibility determination."),
+    "ov-tiles": ("Overview", "Fleet summary tiles: impacted resources, instances, "
+                 "retirement vs end-of-life split, count below readiness 60, "
+                 "fleet readiness score and days to the next retirement."),
+    "ov-urgency": ("Overview", "Impacted instances grouped by urgency band."),
+    "ov-gen": ("Overview", "Impacted resources by the actual Hyper-V generation "
+               "read from each managed OS disk."),
+    "ov-complexity": ("Overview", "Resource and instance counts by populated scored platform-change "
+                      "band, with average platform score; not workload complexity or approval."),
+    "ov-commercial": ("Overview", "Series in scope for the 1 February 2027 pricing "
+                      "update and captured RI purchase/renewal cutoffs; customer coverage not inspected."),
+    "ov-topsizes": ("Overview", "The 25 most-used affected sizes with their "
+                    "recommended target and next retirement date."),
+    "imp-grid": ("Impacted resources", "Every affected VM and scale set with region, "
+                 "actual generation, recommended target, target region availability, "
+                 "readiness score and named blockers."),
+    "regional-price-grid": ("Impacted resources", "Independent inventory of VMs and scale sets "
+                            "in seven regions with publicly reported pricing changes; potential exposure "
+                            "and reported exclusions, not a confirmed bill forecast."),
+    "sql-modernization-grid": ("SQL modernization", "Retiring VMs with exact SQL IaaS extension identity "
+                               "and/or SQL VM registration, deduplicated per VM, including Flexible members. "
+                               "Edition/license/group registration are not runtime or HA-health proof."),
+    "path-v5-grid": ("Upgrade paths", "Full-width V5 panel: compact status/count summary and per-VM "
+                     "vertical details; all 22 prerequisite statuses and evidence retained in exports."),
+    "path-v6-grid": ("Upgrade paths", "Stacked full-width V6 panel: independent target, compact summary "
+                     "and per-VM vertical details; all 22 statuses and conversion/NVMe evidence retained."),
+    "map-grid": ("Target mapping", "One row per affected size: current spec, "
+                 "recommended target, memory-preserving alternative and retirement date."),
+    "map-detail": ("Target mapping", "Alternate targets, size considerations, series "
+                   "spec deltas, pricing-update flag and Reserved Instance status."),
+    "pre-grid": ("Prerequisites", "Prerequisites this fleet actually triggers, ranked "
+                 "Blocking / Validate / Plan, with the affected resource count."),
+    "plan-waves": ("Migration plan", "Suggested migration waves derived from readiness "
+                   "score and production tagging."),
+    "plan-burndown": ("Migration plan", "Instances to migrate by retirement quarter."),
+    "plan-longpole": ("Migration plan", "Resources scoring below 60 - the workloads "
+                      "with the longest lead time."),
+    "about-coverage": ("About", "How many resources matched the lifecycle catalogue, "
+                       "by lifecycle stage."),
+    "about-allsizes": ("About", "Every VM size in scope with explicit mapped/unassessed classification. "
+                       "Unknown SKUs are retained, and Flexible model capacity is counted once."),
+}
+
+BAG = re.compile(r"parse_json\('\{.*?\}'\)", re.S)
+WORKFLOW_SECTIONS = {
+    "Overview": "Inventory - Fleet overview",
+    "Impacted resources": "Inventory - Retirement and pricing",
+    "Workload discovery": "Inventory - Workloads and owners",
+    "About": "Inventory - Catalogue coverage",
+    "Upgrade paths": "Assess - V5 and V6 paths",
+    "Prerequisites": "Assess - Required actions",
+    "SQL modernization": "Assess - SQL opportunities",
+    "Capacity / quota": "Plan - Capacity and quota",
+    "Target mapping": "Plan - Target specifications",
+    "Migration plan": "Plan - Suggested waves",
+}
+
+
+def elide(query):
+    """Replace the machine-generated lookup literals with a placeholder."""
+    return BAG.sub("parse_json('{ ...lifecycle lookup, see note below... }')", query)
+
+
+def common_prefix(queries):
+    """Longest shared leading run of lines across the ARG queries.
+
+    Every fleet query is the same base inventory-and-scoring pipeline with a
+    different tail. Printing that prefix once keeps the document readable.
+    """
+    line_lists = [q.strip().split("\n") for q in queries]
+    shortest = min(len(x) for x in line_lists)
+    n = 0
+    while n < shortest and len({x[n] for x in line_lists}) == 1:
+        n += 1
+    return line_lists[0][:n]
+
+
+def collect(items, out, tab=None):
+    for it in items:
+        if it.get("type") == 12:
+            collect(it["content"]["items"], out, tab)
+        elif it.get("type") == 3 and it["content"].get("queryType") == 1:
+            out.append((it["name"], it["content"]))
+    return out
+
+
+def main():
+    wb = json.load(open(WB, encoding="utf-8"))
+    queries = collect(wb["items"], [])
+    os.makedirs(DOCS, exist_ok=True)
+
+    elided = {name: elide(expand_lookups(c["query"], wb)) for name, c in queries}
+    # about-allsizes is a standalone coverage query, not part of the fleet
+    # pipeline, so it would collapse the shared prefix to nothing.
+    independent = {"about-allsizes", "regional-price-grid", "eligibility-status"}
+    fleet = [q for n, q in elided.items()
+             if n not in independent and not n.startswith("discovery-")]
+    prefix = common_prefix(fleet)
+    prefix_text = "\n".join(prefix)
+
+    by_tab = {}
+    for name, content in queries:
+        tab, desc = DESCRIPTIONS.get(name, ("Other", ""))
+        tab = WORKFLOW_SECTIONS.get(tab, tab)
+        body = elided[name]
+        if name != "about-allsizes" and body.strip().startswith(prefix_text):
+            body = body.strip()[len(prefix_text):].strip()
+            shared = True
+        else:
+            body = body.strip()
+            shared = False
+        by_tab.setdefault(tab, []).append((name, desc, content, body, shared))
+
+    lines = [
+        "# Azure Resource Graph queries",
+        "",
+        f"The workbook runs **{len(queries)} read-only Azure Resource Graph queries**. "
+        "Nothing is written, no agent is required, and no data leaves the tenant. "
+        "Non-quota queries use the `Subscriptions` picker. Quota queries can read "
+        "all readable subscriptions in the current tenant and apply their separate "
+        "planning-scope dropdown; the headroom view uses tenant-wide candidates.",
+        "",
+        "Assess > V5 / V6 paths also has one **read-only ARM GETARRAY** inspector for "
+        "`/subscriptions/{LiveSubscription}/providers/Microsoft.Compute/skus`, API version "
+        "`2021-07-01`, filtered to `{LiveRegion}`. Its JSONPath selects the exact "
+        "`{LiveTarget}` and preserves full restrictions, location/zone information and capabilities. "
+        "The target is exported from a selected placement combination. A hidden native Merge "
+        "parameter reuses that record without another API request or customer click. The "
+        "`eligibility-status` ARG query evaluates the record and renders red Restricted, green "
+        "Not restricted or amber Unknown. Raw evidence is opt-in. A green access result is "
+        "not quota, policy or physical allocation approval.",
+        "",
+        "Quota checks use indexed Compute `QuotaResources` rather than per-row ARM "
+        "lookups. This enables automatic cross-subscription checks but is eventually "
+        "consistent; verify with Azure Quotas/CLI immediately before migration.",
+        "",
+        "This file is generated by `scripts/build_queries_doc.py` - edit the build "
+        "script, not this file.",
+        "",
+        "## Contents",
+        "",
+        "- [The shared base query](#the-shared-base-query)",
+    ]
+    order = list(WORKFLOW_SECTIONS.values()) + ["Other"]
+    tabs = [t for t in order if t in by_tab]
+    for tab in tabs:
+        anchor = tab.lower().replace(" ", "-")
+        lines.append(f"- [{tab}](#{anchor}) ({len(by_tab[tab])} queries)")
+    lines += [
+        "",
+        "## A note on the embedded lookup",
+        "",
+        "Azure Resource Graph supports neither `let` nor `datatable`, so the "
+        "628-size lifecycle catalogue is stored once in hidden text parameters. "
+        "Workbooks substitutes the parameters into each query before sending it "
+        "to ARG, producing a `parse_json('{...}')` dynamic literal indexed by VM size. That literal is "
+        "about 84 KB and is elided throughout this document for readability. "
+        "It is generated from `references/sku-migration-map.json`; warning codes are "
+        "stored as single characters and region lists as hex indices into a shared "
+        "region table. Sharing the lookups keeps the saved workbook below the "
+        "1 MB limit without removing any sizes or queries.",
+        "",
+        "The fields packed into each lookup record, in order:",
+        "",
+        "| # | Field | Meaning |",
+        "| ---: | --- | --- |",
+        "| 0 | Lifecycle | `RETIRE`, `EOL` or `OPTIONAL` |",
+        "| 1 | SeriesGroup | Announcement grouping, used for the source link |",
+        "| 2 | RetirementDate | Announced retirement date, empty when none |",
+        "| 3 | RecommendedTarget | Default same-or-better replacement size |",
+        "| 4 | MemoryPreservingTarget | Alternative when the default reduces RAM |",
+        "| 5-6 | TargetVcpu, TargetMemoryGB | Target spec |",
+        "| 7-8 | CurrentVcpu, CurrentMemoryGB | Source spec |",
+        "| 9 | WarnCodes | Single-character prerequisite codes |",
+        "| 10 | AlternateTargets | Up to three alternates |",
+        "| 11 | RiEnded | Reserved Instance purchase and renewal end date |",
+        "| 12 | Series | Size series name |",
+        "| 13 | PriceUpdate | `1` when the series is in scope for 1 Feb 2027 |",
+        "| 14-15 | MpVcpu, MpMemoryGB | Memory-preserving target spec |",
+        "",
+        "## The shared base query",
+        "",
+        "Every fleet query below starts with this pipeline. It inventories the VMs "
+        "and scale sets, joins each to its managed OS disk to read the real "
+        "`hyperVGeneration`, looks the size up in the lifecycle catalogue, and "
+        "computes a platform-only score (legacy field `ReadinessScore`), not application approval. Per-query "
+        "tails are shown in the sections that follow and should be appended to this "
+        "prefix.",
+        "",
+        "```kusto",
+        prefix_text,
+        "```",
+        "",
+    ]
+
+    for tab in tabs:
+        lines += [f"## {tab}", ""]
+        for name, desc, content, body, shared in by_tab[tab]:
+            lines += [
+                f"### `{name}`",
+                "",
+                desc or "_No description._",
+                "",
+                f"- **Visualization:** {content.get('visualization') or 'table'}",
+                f"- **Scope:** `{', '.join(content.get('crossComponentResources', []))}`",
+            ]
+            if shared:
+                lines.append("- **Base:** appended to the shared base query above")
+            lines += ["", "```kusto", body, "```", ""]
+
+    path = os.path.join(DOCS, "QUERIES.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"{len(queries)} queries -> {path} ({os.path.getsize(path)/1024:.0f} KB)")
+
+
+if __name__ == "__main__":
+    main()
