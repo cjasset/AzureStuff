@@ -20,12 +20,13 @@ Log Analytics workspace (LAW), customer-created table, storage account, Function
 Automation account, backend, agent installation or ingestion pipeline to provision.
 Catalogue lookups, migration routes and checklists are embedded in the saved workbook.
 No community tools or external catalogue feeds run when customers open it.
+No workbook section requires running a script or importing JSON.
 
 The workbook is **not offline**: customers need authenticated Azure control-plane
 access and read permissions for the subscriptions and resource types they inspect.
 It reads Azure's built-in Resource Graph tables (including `QuotaResources`,
 `AdvisorResources`, `BatchResources` and `DesktopVirtualizationResources`) and
-the existing read-only Compute SKU, Batch pool, Reservations, management-group and quota-group ARM endpoints. Reservation
+the existing read-only Compute SKU, Batch pool and Reservations ARM endpoints. Reservation
 visibility requires reservation-level permissions, separately from subscription Reader. Those built-in
 tables are Azure-managed indexes, not tables the customer must deploy.
 Missing permissions, index gaps and failed APIs are not a pass.
@@ -477,69 +478,18 @@ remain red even if other checks are unknown.
 - **Quota checks and shortfalls:** additional cores required by the chosen
   migration approach, available quota (limit minus all existing usage), shortfall
   and status. Shortfall is floored at zero; a blank means Unknown.
-- **Tenant headroom / quota group discussion:** readable subscriptions with
+- **Tenant headroom:** readable subscriptions with
   relevant target-family/region quota, even without affected source VMs.
   Available cores are capped by both family and regional headroom. This is
   unused quota **now**, not surplus after their planned migrations.
 
-Headroom is a discussion lead, **not a shared pool**. The optional **Live
-quota-group inspector** uses an imported discovery list, avoiding management-group
-hunting. Run the read-only [Find-QuotaGroups.ps1](scripts/Find-QuotaGroups.ps1)
-with Azure CLI installed and signed in to the intended tenant (`az login --tenant <tenant-id>`):
-
-```powershell
-.\scripts\Find-QuotaGroups.ps1 -OutputPath .\quota-group-discovery.json
-Get-Content .\quota-group-discovery.json -Raw | Set-Clipboard
-```
-
-Paste the **complete JSON** into **Paste discovery JSON**, then select a
-**Discovered quota group**, subscription, region and metric. A single discovered
-group is selected automatically. The script scans every enumerated readable
-management group, follows management-group and quota-group pagination, deduplicates
-IDs, and retries throttling/transient service errors up to three attempts.
-It uses Azure CLI's authenticated read-only ARM GET requests because the quota
-CLI extension does not expose group discovery. It currently targets Azure public
-cloud. It never obtains or writes credentials to the report.
-
-Discovery is a **timestamped snapshot**; rerun and paste again to refresh. Status,
-scope counts and `failedScopes` disclose coverage. An incomplete scan writes its
-partial report, warns and exits with an error; a successful empty scan means no
-groups were returned for the readable scopes, not that none exist in the tenant.
-Unreadable management groups remain outside discovery coverage. Malformed responses,
-unexpected group scope and unsafe/repeated pagination links are not accepted.
-No customer discovery data is bundled in the portable workbook or published source.
-
-The workbook itself needs **no script at runtime and no supporting service**.
-The script performs the cross-management-group loop; native ARM `GETARRAY`
-pagination is not a dynamic loop over different management-group endpoints.
-Only discovery is imported; selected membership and regional pool data are still
-fetched live through native ARM queries. Live evidence is **one selected scope,
-not an automatic tenant-wide quota assessment**.
-It is independent of fleet scope and target scenario. Membership comes from the
-quota-group API, never management-group ancestry.
-
-Separate columns show verified membership, group limit, **unallocated group
-cores**, quota already allocated to the selected subscription and the next action.
-An unallocated pool must be allocated first; it never turns a subscription
-shortfall green. Already allocated quota is not added to subscription limits again.
-Missing, invalid, duplicate,
-pending or mismatched evidence stays Unknown; nested pool/allocation continuation
-pages also remain Unknown rather than claiming complete coverage. Empty lists or
-access errors do not establish that no group exists. Raw evidence is opt-in.
-The inspector does not assess donor `shareableQuota`, subscription eligibility,
-physical capacity or competing migration demand, and never creates groups,
-changes membership, moves quota or requests increases. See
-[quota groups](https://learn.microsoft.com/azure/quotas/quota-groups).
-Quota-group read permissions are inherited from the owning management group;
-subscription Reader access alone does not establish access to that group.
-
-The imported picker reads the report's `groups` array. Do not paste only a group
-ID or the raw ARM page envelope. Empty/invalid JSON does not establish absence.
-Live results may take a few seconds to load. KQL uses documented `escapejson`
-formatting inside quoted string literals, then parses the record text; empty
-responses cannot expand to invalid `dynamic()` expressions or unquoted IDs.
-Validation executes the complete production header with empty, object,
-JSON-encoded and escaped record text, plus paged/empty/partial discovery cases.
+Headroom is a discussion lead, **not a shared pool**. **Quota groups are not
+assessed in this release.** The inspector, group selectors, JSON import and
+discovery helper have been removed pending a suitable workbook-native design.
+Subscription family/regional quota checks and tenant headroom remain available
+without scripts, imports or supporting services. Unused quota in another
+subscription cannot cancel the selected subscription's shortfall, and no quota
+is transferred or requested.
 
 Missing CPU/family metadata, missing quota, or Spot workloads keep the relevant
 estimate **Unknown**, not unlimited or zero shortfall. Duplicate quota metrics are
@@ -691,7 +641,7 @@ The first row is the dangerous one: a production VM sequenced into wave 1.
 ## The queries
 
 Every Azure Resource Graph query the workbook runs is documented verbatim in
-[`docs/QUERIES.md`](docs/QUERIES.md) - 36 read-only ARG queries alongside native ARM inspectors, with the shared base
+[`docs/QUERIES.md`](docs/QUERIES.md) - 35 read-only ARG queries alongside native ARM inspectors, with the shared base
 pipeline shown once and each per-tab tail alongside it. Nothing is hidden: you
 can audit exactly what executes against your tenant before you deploy.
 
@@ -777,15 +727,15 @@ python scripts/build_workbook.py      # regenerate workbook + ARM template
 python scripts/build_queries_doc.py   # regenerate docs/QUERIES.md
 python scripts/validate_queries.py --offline  # size, structure and published artifact checks
 python -m unittest discover -s scripts -p "test_*.py"  # offline regression tests
-python scripts/validate_queries.py    # all 36 live ARG queries in the current CLI subscription
+python scripts/validate_queries.py    # all 35 live ARG queries in the current CLI subscription
 # Optional quota scope / migration approach (CLI authorization scope remains --subscription):
 # python scripts/validate_queries.py --subscription <id> --quota-scope tenant --migration-mode inplace --quota-generation 6
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 83 offline tests, all 36 live ARG queries plus 12 V5/V6/V7 quota-scenario
+scope: 75 offline tests, all 35 live ARG queries plus 12 V5/V6/V7 quota-scenario
 queries, standalone-dependency regression checks, 32 quota and pricing/SQL boundary
-fixtures, 20 production-KQL quota-group cases, guided discovery API probes,
+fixtures, workbook-native discovery API probes,
 workload-discovery fixtures and exact live target-SKU records. Additional
 ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,
 nine placement cases on all three paths and all 22 prerequisite summary counts.
@@ -858,7 +808,7 @@ characters and region lists use hex indices into a shared region table.
 Earlier builds repeated the lookups in every chart, exceeding the saved-workbook
 size limit and failing with **"The workbook length is too large"** through both
 ARM deployment and Advanced Editor save. The shared lookups preserve the full
-628-size catalogue and all 36 ARG queries while keeping the saved workbook below
+628-size catalogue and all 35 ARG queries while keeping the saved workbook below
 1 MB. Standalone workbook files are emitted compactly; both raw-file and saved-resource
 sizes are validated. Rebuilds fail if that limit is reached; use the current published template
 or workbook rather than an older downloaded copy.

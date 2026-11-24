@@ -26,8 +26,6 @@ from workload_evidence import (compute_evidence_query, configured_pools_query,
                                sql_evidence_query)
 from reservation_evidence import (FIRST_PAGE, coverage_query as reservation_coverage_query,
                                   inventory_query as reservation_inventory_query)
-from quota_group_evidence import (arm_request as group_arm_request,
-                                  evidence_query as group_evidence_query, merge_parameter)
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -849,7 +847,7 @@ def quota_headroom_query(base):
 | extend AvailableCores = iff(QuotaUnknown, tolong(''),
              iff(FamilyAvailable < RegionalAvailable, FamilyAvailable, RegionalAvailable))
 | extend HeadroomStatus = case(QuotaUnknown, 'Unknown - quota missing',
-             AvailableCores <= 0, 'No unused quota', 'Potential headroom - assess quota group eligibility')
+             AvailableCores <= 0, 'No unused quota', 'Potential headroom - assess subscription eligibility')
 | project SubscriptionId, Region, TargetQuotaFamily, AvailableCores, HeadroomStatus
 | order by Region asc, TargetQuotaFamily asc, AvailableCores desc"""
 
@@ -912,8 +910,7 @@ def quota_planning_items(base, regions, families):
              [("sidebyside", "Side-by-side (keep sources)"), ("inplace", "In-place (conservative if needed)")]),
             ("QuotaDetails", "Show detail", "none",
              [("none", "Summary only"), ("migration", "Migration breakdown"),
-              ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion"),
-              ("groups", "Live quota-group inspector"),
+              ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom"),
               ("key", "Column key & assumptions")]),
             ("QuotaGeneration", "Target scenario", "default",
              [("default", "Default V5-first"), ("5", "V5 only"), ("6", "V6 only"), ("7", "V7 only")]),
@@ -938,16 +935,13 @@ def quota_planning_items(base, regions, families):
             "**Conservative:** full target cores for deallocated/unknown sources. **Red:** insufficient quota. **Amber:** missing quota/target data. "
             "**Green:** quota only, not physical capacity or migration approval. Missing targets stay Unknown; "
             "spare quota elsewhere cannot cancel a shortfall.\n\n"
-            "Independent of Live target availability. **Show detail** opens breakdowns, shortfalls, groups or the key.",
+            "Independent of Live target availability. **Quota groups are not assessed.** "
+            "**Show detail** opens breakdowns, shortfalls, tenant headroom or the key.",
             "quota-intro"),
         {"type": 9, "name": "quota-parameters", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills",
             "parameters": [dict(p, version="KqlParameterItem/1.0") for p in parameters]}},
         summary, demand, checks, headroom,
-        {"type": 12, "name": "quota-group-inspector",
-         "conditionalVisibility": {"parameterName": "QuotaDetails", "comparison": "isEqualTo", "value": "groups"},
-         "content": {"version": "NotebookGroup/1.0", "groupType": "editable",
-                     "items": quota_group_items(regions, families)}},
         conditional_text("quota-key", "QuotaDetails", "key",
             "### Column key & assumptions\n\n"
             "Totals plus subscription rows. **Planning scope:** selected or all readable tenant "
@@ -967,9 +961,8 @@ def quota_planning_items(base, regions, families):
             "**Quota checks:** AdditionalCores is required headroom; Available is limit minus current usage; "
             "Shortfall is max(additional minus available, zero); blank means Unknown. Regional demand "
             "includes all families. **Tenant headroom** is unused family quota capped by regional headroom, "
-            "not post-migration surplus or pooled quota. **Live quota-group inspector** checks one selected "
-            "management group/group/subscription/region/metric, not tenant-wide membership or transfer eligibility. "
-            "No quota is moved; verify membership, eligibility, limits and approvals separately.\n\n"
+            "not post-migration surplus or pooled quota. **Quota groups are not assessed**; "
+            "headroom in another subscription cannot satisfy the selected subscription's shortfall.\n\n"
             "**Quota is not physical capacity or resize approval.** Validate SKU/zone access, policy, boot/drivers "
             "and allocation. Targets use `vCPUs`, not constrained `vCPUsAvailable`. Lifecycle filters "
             "do not remove demand; scenarios do not change Inventory recommendations. "
@@ -978,89 +971,18 @@ def quota_planning_items(base, regions, families):
     ]
 
 
-def quota_group_items(regions, families):
-    parameters = [{
-        "version": "KqlParameterItem/1.0", "name": "QuotaGroupDiscovery",
-        "label": "Paste discovery JSON", "type": 1,
-        "value": '{"status":"Not scanned","checkedAtUtc":"","groups":[]}',
-    }, {
-        "version": "KqlParameterItem/1.0", "name": "QuotaGroupId", "label": "Discovered quota group",
-        "type": 2, "isRequired": True, "jsonData": "{QuotaGroupDiscovery:$.groups}",
-        "typeSettings": {"showDefault": False},
-    }]
-    parameters.append({
-        "version": "KqlParameterItem/1.0", "name": "QuotaGroupSubscription", "type": 6,
-        "label": "Subscription to inspect", "isRequired": True,
-        "typeSettings": {"additionalResourceOptions": ["value::1"], "showDefault": False},
-        "value": "value::1",
-    })
-    for name, label, values in (
-            ("QuotaGroupRegion", "Region to inspect", sorted(regions)),
-            ("QuotaGroupMetric", "Quota metric to inspect", ["cores"] + sorted(set(families.values())))):
-        parameters.append({
-            "version": "KqlParameterItem/1.0", "name": name, "label": label, "type": 2,
-            "isRequired": True, "jsonData": json.dumps(
-                [{"value": v, "label": v} for v in values], separators=(",", ":")),
-            "value": values[0],
-        })
-    parameters.append({
-        "version": "KqlParameterItem/1.0", "name": "QuotaGroupEvidence", "label": "Evidence detail",
-        "type": 2, "isRequired": True, "value": "summary",
-        "jsonData": json.dumps([{"value": "summary", "label": "Summary"},
-                                {"value": "raw", "label": "Summary + raw API evidence"}]),
-    })
-    items = [
-        text_item(
-            "### Live quota-group inspector\n\n"
-            "Run the optional read-only [discovery script]"
-            "(https://github.com/cjasset/AzureStuff/blob/main/workbooks/azure-vm-retirement-upgrade-planner/scripts/Find-QuotaGroups.ps1), "
-            "paste its JSON below, then select a discovered group, subscription, region and metric. "
-            "Discovery is a timestamped snapshot, not live; rerun to refresh. "
-            "Incomplete scans list failed scopes in the JSON; empty lists do not prove no group exists.\n\n"
-            "**Live evidence: one selected scope, not a tenant-wide scan**; independent of fleet filters/scenarios. "
-            "API membership is **not inferred from management-group ancestry**. "
-            "Allocate pool quota first, then refresh family and regional subscription checks. "
-            "Already allocated quota is not added again. "
-            "Pool/allocation continuation pages stay Unknown; review Azure Quotas for full coverage. "
-            "Donor shareable quota, eligibility and capacity are not assessed. "
-            "No group, membership or quota is changed. "
-            "[Quota-group guidance](https://learn.microsoft.com/azure/quotas/quota-groups).",
-            "group-quota-intro"),
-        {"type": 9, "name": "group-quota-controls", "content": {
-            "version": "KqlParameterItem/1.0", "style": "pills", "parameters": parameters}},
-        text_item("Discovery status: **{QuotaGroupDiscovery:$.status}**; scanned UTC: "
-                  "**{QuotaGroupDiscovery:$.checkedAtUtc}**. Snapshot only; membership/pool evidence below is live.",
-                  "group-quota-discovery-status"),
-    ]
-    for name, parameter in (("group-quota-membership", "QuotaGroupMemberRecord"),
-                            ("group-quota-pool", "QuotaGroupPoolRecord")):
-        items.append({
-            "type": 3, "name": name, "content": {
-                "version": "KqlItem/1.0", "queryType": 12,
-                "query": group_arm_request(name, [("Record", "$")]),
-                "title": "Live membership evidence" if name.endswith("membership") else "Live regional group-pool evidence",
-                "size": 3, "visualization": "table",
-                "gridSettings": grid_settings({"Record": "100%"}),
-                "noDataMessage": "Unknown: no API evidence. Check permissions, selected scope and API errors.",
-            },
-            "conditionalVisibility": {"parameterName": "QuotaGroupEvidence", "comparison": "isEqualTo", "value": "raw"},
-        })
-        items.append({"type": 9, "name": name + "-record", "content": {
-            "version": "KqlParameterItem/1.0",
-            "parameters": [merge_parameter(parameter, name, "Record")]}})
-    items.append(arg_query(
-        group_evidence_query(), "group-quota-evidence", size=1, export=True,
-        title="Quota-group evidence - separate from subscription quota checks",
-        grid=grid_settings(
-            {"Subscription": "30ch", "Region": "15ch", "Metric": "25ch", "Membership": "24ch",
-             "Group quota evidence": "34ch", "Group limit": "12ch", "Unallocated group cores": "16ch",
-             "Already allocated to subscription": "20ch", "Next action": "45ch"},
-            [fmt("Group quota evidence", 18, formatOptions={
-                "thresholdsOptions": "colors", "thresholdsGrid": [
-                    {"operator": "contains", "thresholdValue": "Unknown", "representation": "orange", "text": "{0}{1}"},
-                    {"operator": "Default", "representation": "blue", "text": "{0}{1}"}]})]
-            + [fmt(c, 5) for c in ("ManagementGroupAndQuotaGroup", "CheckedAtUtc")])))
-    return items
+def merge_parameter(name, table, column):
+    merge_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{name}:{table}:{column}"))
+    return {
+        "version": "KqlParameterItem/1.0", "name": name, "type": 1,
+        "isHiddenWhenLocked": True, "value": "", "queryType": 7,
+        "query": json.dumps({
+            "version": "Merge/1.0",
+            "merges": [{"id": merge_id, "mergeType": "table", "leftTable": table}],
+            "projectRename": [{"originalName": f"[{table}].{column}",
+                               "mergedName": column, "fromId": merge_id}],
+        }, separators=(",", ":")),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -3139,7 +3061,7 @@ def build(data):
             item["customWidth"] = "100"
         content = item.get("content", {})
         for record in [content, *content.get("parameters", [])]:
-            if "jsonData" in record and record["jsonData"] != "{QuotaGroupDiscovery:$.groups}":
+            if "jsonData" in record:
                 record["jsonData"] = json.dumps(json.loads(record["jsonData"]), separators=(",", ":"))
             if record.get("queryType") in (7, 12) and "query" in record:
                 record["query"] = json.dumps(json.loads(record["query"]), separators=(",", ":"))

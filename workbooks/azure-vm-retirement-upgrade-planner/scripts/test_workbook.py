@@ -59,9 +59,6 @@ class WorkbookDeploymentTests(unittest.TestCase):
         for item in walk_items(self.workbook["items"]):
             for parameter in item.get("content", {}).get("parameters", []):
                 if "jsonData" in parameter:
-                    if parameter["name"] == "QuotaGroupId":
-                        self.assertEqual(parameter["jsonData"], "{QuotaGroupDiscovery:$.groups}")
-                        continue
                     self.assertEqual(parameter["jsonData"], json.dumps(
                         json.loads(parameter["jsonData"]), separators=(",", ":")))
 
@@ -254,12 +251,10 @@ class WorkbookDeploymentTests(unittest.TestCase):
         original = builder.base_query(sku_map, regions, region_ids)
         queries = []
         walk(self.workbook, queries)
-        self.assertEqual(len(queries), 36)
+        self.assertEqual(len(queries), 35)
         for name, query in queries:
             expanded = builder.expand_lookups(query, self.workbook)
-            if name == "group-quota-evidence":
-                self.assertEqual(query, builder.group_evidence_query())
-            elif name.startswith("reservation-"):
+            if name.startswith("reservation-"):
                 self.assertIn("{ReservationPageRecord:json}", query)
                 self.assertNotIn("resources\n", query)
             elif name == "eligibility-status":
@@ -569,8 +564,7 @@ class WorkbookDeploymentTests(unittest.TestCase):
                          ["eligibility-fit-intro", "eligibility-fit"])
         arms = [item for item in walk_items(self.workbook["items"]) if item.get("content", {}).get("queryType") == 12]
         self.assertEqual({item["name"] for item in arms},
-                         {"eligibility-live", "discovery-batch-live", "reservation-live",
-                          "group-quota-membership", "group-quota-pool"})
+                         {"eligibility-live", "discovery-batch-live", "reservation-live"})
 
     def test_access_summary_has_red_green_unknown_and_raw_is_opt_in(self):
         content = find_item(self.workbook, "eligibility-status")["content"]
@@ -809,6 +803,16 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertIn("key", {choice["value"] for choice in json.loads(detail["jsonData"])})
 
     def test_quota_headroom_is_not_pooled_with_migration_checks(self):
+        serialized = json.dumps(self.workbook)
+        for removed in ("QuotaGroup", "group-quota-", "groupQuotas", "Find-QuotaGroups.ps1",
+                        "Paste discovery JSON"):
+            self.assertNotIn(removed, serialized)
+        self.assertIn("Quota groups are not assessed", find_item(self.workbook, "quota-intro")["content"]["json"])
+        controls = find_item(self.workbook, "quota-parameters")["content"]["parameters"]
+        details = next(p for p in controls if p["name"] == "QuotaDetails")
+        options = {option["value"] for option in json.loads(details["jsonData"])}
+        self.assertNotIn("groups", options)
+        self.assertIn("headroom", options)
         self.assertIn("Counts['cores']", builder.quota_headroom_query("resources"))
         self.assertIn("FamilyAvailable < RegionalAvailable", builder.quota_headroom_query("resources"))
         self.assertNotIn("quota_headroom", builder.quota_summary_query("resources"))
