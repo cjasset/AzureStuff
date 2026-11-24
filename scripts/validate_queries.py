@@ -22,7 +22,7 @@ WB = os.path.join(OUT, "azure-vm-retirement-workbook.json")
 SUBSTITUTIONS = {
     "{LifecycleFilter}": "RETIRE,EOL,OPTIONAL",
     "{QuotaScope}": "selected",
-    "{QuotaMigrationMode}": "sidebyside",
+    "{QuotaMigrationMode}": "inplace",
     "{QuotaGeneration}": "default",
     "{DiscoveryWorkload}": "All",
     "{EligibilityGeneration}": "5",
@@ -289,7 +289,7 @@ def main():
                         help="Check structure and published deployment artifacts without Azure.")
     parser.add_argument("--subscription", help="Live query scope; defaults to the current CLI subscription.")
     parser.add_argument("--quota-scope", choices=("selected", "tenant"), default="selected")
-    parser.add_argument("--migration-mode", choices=("sidebyside", "inplace"), default="sidebyside")
+    parser.add_argument("--migration-mode", choices=("sidebyside", "inplace"), default="inplace")
     parser.add_argument("--quota-generation", choices=("default", "5", "6", "7"), default="default")
     parser.add_argument("--query", action="append", dest="query_names",
                         help="Validate only these named ARG queries; repeat for related queries.")

@@ -868,8 +868,8 @@ def quota_planning_items(base, regions, families):
     summary = arg_query(quota_summary_query(base), "quota-summary", export=True, size=1,
                         title="Core migration plan: total and per subscription",
                         grid=grid_settings(
-                            {"Scope": "38ch", "Current cores": "14ch", "Target cores": "14ch",
-                             "Delta (+/-)": "12ch", "Quota status": "34ch"},
+                            {"Scope": "3fr", "Current cores": "2fr", "Target cores": "2fr",
+                             "Delta (+/-)": "2fr", "Quota status": "3fr"},
                             [quota_status_formatter("Quota status")]
                             + [fmt(c, 5) for c in ("SubscriptionId", "FailedChecks", "UnknownChecks")]))
     checks = arg_query(quota_check_query(base), "quota-check", export=True, size=1,
@@ -901,7 +901,7 @@ def quota_planning_items(base, regions, families):
         for name, label, default, choices in (
             ("QuotaScope", "Planning scope", "selected",
              [("selected", "Selected subscriptions"), ("tenant", "Tenant - all readable subscriptions")]),
-            ("QuotaMigrationMode", "Migration approach", "sidebyside",
+            ("QuotaMigrationMode", "Migration approach", "inplace",
              [("sidebyside", "Side-by-side (keep sources)"), ("inplace", "In-place (validate allocation)")]),
             ("QuotaDetails", "Show detail", "none",
              [("none", "Summary only"), ("migration", "Migration breakdown"),
@@ -921,15 +921,17 @@ def quota_planning_items(base, regions, families):
     return [
         text_item(
             "## Capacity & quota\n\n"
-            "Estimate retirement/EOL migration cores and check every affected subscription / region / target family.\n\n"
-            "**Current cores** = configured source quota-vCPUs, including deallocated inventory; "
-            "**Target cores** = selected scenario's quota-vCPUs; **Delta** = target minus current, not the quota request.\n\n"
-            "**Red:** insufficient quota. **Amber:** incomplete evidence or unverified in-place allocation. "
-            "**Green:** quota headroom only, not physical capacity or migration approval. "
-            "Missing targets stay Unknown; spare quota elsewhere cannot cancel a shortfall.\n\n"
-            "Choose the matching target scenario and migration approach. This fleet calculation is independent "
-            "of the Live target availability selection. Use **Show detail** for shortfalls, tenant headroom or the key.\n\n"
-            "**Next:** resolve access/quota actions, then confirm physical allocation, service limits and workload readiness.",
+            "Retirement/EOL migration quota estimates.\n\n"
+            "**Current cores** = source quota-vCPUs, including deallocated inventory; "
+            "**Target cores** = target quota-vCPUs; **Delta** = target minus current, not the quota request.\n\n"
+            "**In-place (default):** resize existing VMs. Regional quota models positive core growth; "
+            "a different target family still needs full target-family cores. Requires verified source allocation; "
+            "this model does not confirm that resizing is supported.\n\n"
+            "**Side-by-side:** deploy replacements while keeping sources allocated; quota must cover both fleets.\n\n"
+            "**Red:** insufficient quota. **Amber:** incomplete evidence/unverified allocation. "
+            "**Green:** quota only, not physical capacity or migration approval. Missing targets stay Unknown; "
+            "spare quota elsewhere cannot cancel a shortfall.\n\n"
+            "Independent of Live target availability. **Show detail** opens breakdowns, shortfalls, groups or the key.",
             "quota-intro"),
         {"type": 9, "name": "quota-parameters", "content": {
             "version": "KqlParameterItem/1.0", "style": "pills",
@@ -953,10 +955,9 @@ def quota_planning_items(base, regions, families):
             "`QuotaResources` usage and limits. Both regional and family checks must pass; spare quota "
             "in another subscription or region never cancels a shortfall. Indexing is eventually consistent: "
             "refresh and recheck with Azure Quotas/CLI before migration. Missing records are Unknown, not unlimited.\n\n"
-            "**Migration approach:** side-by-side requires the full target cores as additional quota. "
-            "In-place uses positive regional deltas, but cross-family moves still need the full target-family "
-            "cores. No negative credits from shrinking other VMs. Spot and deallocated/unknown in-place "
-            "allocations stay Unknown. The Delta column does not change with this choice.\n\n"
+            "**Migration approach:** see the definitions beside the selector. In-place grants no negative "
+            "credits for downsizing other VMs. Spot or deallocated/unknown allocations stay Unknown. "
+            "Delta is unchanged by the approach.\n\n"
             "**Show detail** opens one optional table at a time. Quota checks explains **AdditionalCores**, "
             "**Available** (limit minus all current usage), and **Shortfall** (additional minus available, "
             "floored at zero). Blank shortfall means Unknown. Regional demand includes all target families. "
@@ -1010,14 +1011,14 @@ def quota_group_items(regions, families):
     items = [
         text_item(
             "### Live quota-group inspector\n\n"
-            "Choose a management group, quota group, subscription, region and metric. "
-            "Discovery lists follow standard API pages automatically. "
+            "Select a management group, quota group, subscription, region and metric. "
+            "Discovery follows API pages. "
             "**One selected scope, not a tenant-wide scan**; independent of fleet filters/scenarios. "
             "Empty lists/API errors do not prove no group exists.\n\n"
-            "Membership is read from the quota-group API, **not inferred from management-group ancestry**. "
-            "An unallocated pool is not subscription headroom: allocate it first, then refresh both family "
-            "and regional subscription checks. Already allocated quota is not added again. "
-            "Pool/allocation continuation pages remain Unknown; inspect Azure Quotas for full coverage. "
+            "API membership is **not inferred from management-group ancestry**. "
+            "Allocate pool quota first, then refresh family and regional subscription checks. "
+            "Already allocated quota is not added again. "
+            "Pool/allocation continuation pages stay Unknown; review Azure Quotas for full coverage. "
             "Donor shareable quota, subscription eligibility and physical capacity are not assessed. "
             "No group, membership or quota is changed. "
             "[Quota-group guidance](https://learn.microsoft.com/azure/quotas/quota-groups).",
@@ -1070,7 +1071,7 @@ def text_item(md, name, width=None):
 
 def arg_query(query, name, visualization="table", size=0, title=None,
               grid=None, chart=None, tile=None, extra=None, width=None,
-              max_width=None, export=False):
+              export=False):
     content = {
         "version": "KqlItem/1.0",
         "query": query,
@@ -1107,15 +1108,6 @@ def arg_query(query, name, visualization="table", size=0, title=None,
     item = {"type": 3, "content": content, "name": name}
     if width:
         item["customWidth"] = width
-    # A grid always fills its container and no column renders below ~130px, so
-    # a table with few columns in a wide container dumps all the slack into its
-    # widest column. Capping the container is the only way to stop that.
-    #
-    # The cap must stay ABOVE the sum of the natural column widths. Set it any
-    # lower and the grid does not shrink to fit - it overflows and grows a
-    # horizontal scrollbar that renders detached below the row.
-    if max_width:
-        item["styleSettings"] = {"maxWidth": max_width}
     return item
 
 
@@ -1150,11 +1142,16 @@ def grid_settings(width_spec, formatters=(), rows=100, **kw):
     only when the typed rule carries the width itself. Any column present in
     both is therefore emitted once, with the width folded into the typed rule.
 
+    Fractional widths share available space instead of fixing character widths.
     `rows` caps grid result rows independently of the height set by query size.
     """
     typed = {f["columnMatch"]: f for f in formatters}
     rules = []
     for col, w in width_spec.items():
+        if w.endswith("ch"):
+            w = w[:-2] + "fr"
+        elif w.endswith("%"):
+            w = w[:-1] + "fr"
         if col in typed:
             f = dict(typed.pop(col))
             f.setdefault("formatOptions", {})
@@ -2436,8 +2433,7 @@ def build(data):
         base_impacted + """
 | summarize Resources = count(), Instances = sum(Instances), AvgReadiness = round(avg(todouble(ReadinessScore)), 0) by Complexity
 | order by AvgReadiness asc""",
-        "ov-complexity", visualization="table", size=1, width="50",
-        max_width="700px",
+        "ov-complexity", visualization="table", size=1,
         title="Scored platform-change distribution - not workload complexity",
         grid=grid_settings(
             {"Complexity": "37%", "Resources": "21%", "Instances": "21%",
@@ -2452,7 +2448,7 @@ def build(data):
 | summarize Instances = sum(Instances) by Series, PriceUpdate2027, RiStatus
 | where PriceUpdate2027 == 'Yes' or RiStatus startswith 'Series'
 | order by Instances desc""",
-        "ov-commercial", size=1, width="50", max_width="760px",
+        "ov-commercial", size=1,
         title="Series commercial signals - pricing and RI cutoffs",
         grid=grid_settings(
             {"Series": "17%", "PriceUpdate2027": "24%", "RiStatus": "42%",
@@ -2497,7 +2493,7 @@ def build(data):
     by VmSize, Series, ActionCategory, RecommendedTarget
 | order by Instances desc
 | take 25""",
-        "ov-topsizes", size=1, export=True, max_width="1320px", title="Top affected sizes",
+        "ov-topsizes", size=1, export=True, title="Top affected sizes",
         grid=grid_settings(
             {"VmSize": "11%", "Series": "11%", "ActionCategory": "20%",
              "RecommendedTarget": "12%", "Resources": "11%", "Instances": "11%",
@@ -2908,7 +2904,7 @@ def build(data):
             Sizes = strcat_array(make_set(VmSize, 10), ', ')
     by Wave, Environment, EnvSource
 | order by Wave asc""",
-        "plan-waves", size=4, export=True, max_width="1480px", title="Migration waves",
+        "plan-waves", size=4, export=True, title="Migration waves",
         grid=grid_settings(
             {"Wave": "18%", "Environment": "14%", "EnvSource": "14%", "Resources": "9%",
              "Instances": "9%", "EarliestRetirement": "12%", "AvgReadiness": "9%",
@@ -3060,7 +3056,7 @@ def build(data):
         base + """
 | summarize Resources = count(), Instances = sum(Instances) by Lifecycle, ActionCategory
 | order by Instances desc""",
-        "about-coverage", size=4, width="50", max_width="620px",
+        "about-coverage", size=4,
         title="Coverage - resources matched to the lifecycle catalogue",
         grid=grid_settings(
             {"Lifecycle": "26%", "ActionCategory": "32%", "Resources": "21%",
@@ -3068,7 +3064,7 @@ def build(data):
             labelSettings=[{"columnId": "ActionCategory", "label": "Lifecycle status"}])))
     about.append(arg_query(
         coverage_query(),
-        "about-allsizes", size=4, width="50", max_width="560px",
+        "about-allsizes", size=4,
         title="All sizes in scope - explicit captured-catalogue coverage",
         grid=grid_settings({"VmSize": "24ch", "CatalogueCoverage": "50ch", "Resources": "12ch", "Instances": "12ch"},
                            labelSettings=[{"columnId": "VmSize", "label": "Size"}])))
@@ -3130,6 +3126,15 @@ def build(data):
                                      [fmt(name, 5) for name in (
                                          "Category", "LastUpdated", "ExtendedEvidence", "Evidence", "EvaluatedAt")])),
     ])
+    for item in walk_workbook_items(workbook["items"]):
+        if item.get("type") == 3 and item["content"].get("visualization") == "table":
+            item["customWidth"] = "100"
+        content = item.get("content", {})
+        for record in [content, *content.get("parameters", [])]:
+            if "jsonData" in record:
+                record["jsonData"] = json.dumps(json.loads(record["jsonData"]), separators=(",", ":"))
+            if record.get("queryType") in (7, 12) and "query" in record:
+                record["query"] = json.dumps(json.loads(record["query"]), separators=(",", ":"))
     return workbook
 
 

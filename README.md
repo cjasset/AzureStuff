@@ -426,7 +426,10 @@ compatible paths. Missing targets/CPU-family metadata remain Unknown and never
 fall back to another generation. The selected generation is a quota model, not
 an automatic migration approval or a change to Inventory recommendations.
 
-- **Side-by-side:** the entire target fleet needs additional cores while sources
+- **In-place is the default** in the workbook and query-validation CLI. The
+  explanation beside the selector distinguishes quota modelling from confirming
+  that a resize is supported.
+- **Side-by-side:** deploy replacements alongside the originals; the entire target fleet needs additional cores while sources
   remain allocated.
 - **In-place regional:** sum positive target-minus-source core deltas, without
   granting negative credits for downsizing other resources.
@@ -714,7 +717,7 @@ python scripts/validate_queries.py    # all 36 live ARG queries in the current C
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 80 offline tests, all 36 live ARG queries plus 12 V5/V6/V7 quota-scenario
+scope: 82 offline tests, all 36 live ARG queries plus 12 V5/V6/V7 quota-scenario
 queries, standalone-dependency regression checks, 24 quota and pricing/SQL boundary
 fixtures, 20 production-KQL quota-group cases, guided discovery API probes,
 workload-discovery fixtures and exact live target-SKU records. Additional
@@ -799,12 +802,15 @@ or workbook rather than an older downloaded copy.
 Modelled on the official Advisor *Azure Services Retirement* workbook
 (`reference/official-service-retirement.workbook`):
 
-- **Column widths are percentages**, not `ch`. Each grid's widths sum to 100 so
-  the table fits the container instead of scrolling horizontally.
-- **Workbooks enforces a ~130px minimum column width**, so any percentage below
-  about 8% of a full-width grid is silently floored. The practical limit on a
-  1600px canvas is **11-12 columns**; past that the grid scrolls sideways and the
-  scrollbar eats the row height. Cut columns rather than shrinking percentages.
+- **Tables use the full available page width**, including native ARM evidence
+  tables. Half-width and pixel-capped table containers are not used; charts retain
+  their existing layout.
+- **Column widths use native fractional (`fr`) units**, not fixed character
+  widths. Existing relative weights are preserved, with extra room for the
+  Capacity & quota numeric headings. Columns share available width and retain
+  the renderer's content-based minimums. Narrow windows or wide detail tables
+  may still need horizontal scrolling; headings and values are not shortened
+  to force a fit. See [native grid sizing](https://learn.microsoft.com/azure/azure-monitor/visualize/workbooks-grid-visualizations#fractional-unit-percentages).
 - **Query `size` sets the grid height**, and `gridSettings.rowLimit` only caps how
   many rows the query returns - it does not make the grid taller. Measured
   heights: `size: 4` ~126px (3 rows, too cramped), `size: 1` ~220px (~6 rows,
@@ -817,6 +823,8 @@ Modelled on the official Advisor *Azure Services Retirement* workbook
 - **Static dropdowns use `jsonData`**, not `query` + `queryType: 8`. The latter
   never resolves and leaves every dependent query showing *"This query could not
   run because some parameters are not set."*
+  Dropdown and native API/Merge JSON configurations are compactly serialized
+  without changing their values, keeping the artifact within Azure's size limit.
 - **Date columns** carry `dateFormat: {showUtcTime, formatName: shortDatePattern}`,
   otherwise they render as `4/30/2028, 7:00:00 AM`.
 - **Resource and URL links** use formatter 1 with `linkColumn` pointing at a

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import build_workbook as builder
-from validate_queries import run_graph_query, structure_check, walk, walk_items
+from validate_queries import SUBSTITUTIONS, run_graph_query, structure_check, walk, walk_items
 
 
 def find_item(workbook, name):
@@ -37,6 +37,43 @@ class WorkbookDeploymentTests(unittest.TestCase):
                 expected["content"]["gridSettings"]["rowLimit"] = 10
             self.assertEqual(expected, previous_items[item["name"]], item["name"])
         self.assertGreater(tables, 0)
+
+    def test_tables_use_full_width_and_responsive_columns_without_changing_formatters(self):
+        for item in walk_items(self.workbook["items"]):
+            if item.get("type") != 3 or item["content"].get("visualization") != "table":
+                continue
+            self.assertEqual(item["customWidth"], "100", item["name"])
+            self.assertNotIn("maxWidth", item.get("styleSettings", {}), item["name"])
+            for rule in item["content"]["gridSettings"]["formatters"]:
+                width = rule.get("formatOptions", {}).get("customColumnWidthSetting")
+                if width:
+                    self.assertTrue(width.endswith("fr"), (item["name"], rule))
+        grid = builder.grid_settings({"Name": "30ch", "Status": "20%"},
+                                     [builder.fmt("Status", 18, formatOptions={"palette": "auto"})])
+        self.assertEqual(grid["formatters"][0]["formatOptions"]["customColumnWidthSetting"], "30fr")
+        status = grid["formatters"][1]
+        self.assertEqual(status["formatter"], 18)
+        self.assertEqual(status["formatOptions"], {"palette": "auto", "customColumnWidthSetting": "20fr"})
+        for name in ("ov-urgency", "ov-gen"):
+            self.assertEqual(find_item(self.workbook, name)["customWidth"], "50")
+        for item in walk_items(self.workbook["items"]):
+            for parameter in item.get("content", {}).get("parameters", []):
+                if "jsonData" in parameter:
+                    self.assertEqual(parameter["jsonData"], json.dumps(
+                        json.loads(parameter["jsonData"]), separators=(",", ":")))
+
+    def test_inplace_is_default_and_both_approaches_are_explained_beside_controls(self):
+        parameters = find_item(self.workbook, "quota-parameters")["content"]["parameters"]
+        mode = next(p for p in parameters if p["name"] == "QuotaMigrationMode")
+        self.assertEqual(mode["value"], "inplace")
+        self.assertEqual(SUBSTITUTIONS["{QuotaMigrationMode}"], "inplace")
+        self.assertEqual({o["value"] for o in json.loads(mode["jsonData"])}, {"inplace", "sidebyside"})
+        intro = find_item(self.workbook, "quota-intro")["content"]["json"]
+        for phrase in ("In-place (default)", "resize existing VMs", "positive core growth",
+                       "full target-family cores", "verified source allocation",
+                       "does not confirm that resizing is supported",
+                       "Side-by-side", "keeping sources allocated", "both fleets"):
+            self.assertIn(phrase, intro)
 
     def test_graph_validation_retries_throttling_and_preserves_exhausted_failure(self):
         failure = subprocess.CompletedProcess([], 1, "", 'ERROR: {"code": "RateLimiting"}')
