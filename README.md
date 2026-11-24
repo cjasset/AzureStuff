@@ -434,11 +434,15 @@ an automatic migration approval or a change to Inventory recommendations.
 - **In-place regional:** sum positive target-minus-source core deltas, without
   granting negative credits for downsizing other resources.
 - **In-place family:** positive deltas for same-family moves; full target cores
-  for cross-family moves. This assumes the source allocation can be retained or
-  released as planned. Deallocated or unknown source power states (including
-  scale-set models without instance evidence) make the in-place check **Unknown**,
-  with null shortfall. Use side-by-side demand when allocation or resize
-  sequencing is uncertain.
+  for cross-family moves. Source credit requires a running/stopped allocation
+  with known source CPU/family metadata. Deallocated, unknown or transitional
+  states (including scale-set models without instance evidence), or missing
+  source metadata, use **full target cores with no source credit** for both
+  constraints. The result is labelled **conservative**, with numeric shortfalls.
+  Existing usage is already deducted from limits, so this safe upper bound can
+  overestimate demand. A shortfall concerns that conservative plan, not proof
+  every optimized resize fails. Missing quota/target metadata and Spot remain
+  explicitly Unknown rather than being presented as a pass.
 
 Every affected subscription/region/family is checked **automatically** against
 indexed Compute `QuotaResources` limits and usage, including the regional total
@@ -717,8 +721,8 @@ python scripts/validate_queries.py    # all 36 live ARG queries in the current C
 ```
 
 The current release uses an explicitly limited **metadata/API validation**
-scope: 82 offline tests, all 36 live ARG queries plus 12 V5/V6/V7 quota-scenario
-queries, standalone-dependency regression checks, 24 quota and pricing/SQL boundary
+scope: 83 offline tests, all 36 live ARG queries plus 12 V5/V6/V7 quota-scenario
+queries, standalone-dependency regression checks, 32 quota and pricing/SQL boundary
 fixtures, 20 production-KQL quota-group cases, guided discovery API probes,
 workload-discovery fixtures and exact live target-SKU records. Additional
 ARG fixtures cover 20 score-factor cases, every integer score from 0 to 100,

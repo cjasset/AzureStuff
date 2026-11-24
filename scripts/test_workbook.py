@@ -70,10 +70,21 @@ class WorkbookDeploymentTests(unittest.TestCase):
         self.assertEqual({o["value"] for o in json.loads(mode["jsonData"])}, {"inplace", "sidebyside"})
         intro = find_item(self.workbook, "quota-intro")["content"]["json"]
         for phrase in ("In-place (default)", "resize existing VMs", "positive core growth",
-                       "full target-family cores", "verified source allocation",
+                       "full target-family cores", "Unverified sources get no core credit",
                        "does not confirm that resizing is supported",
                        "Side-by-side", "keeping sources allocated", "both fleets"):
             self.assertIn(phrase, intro)
+
+    def test_inplace_unverified_allocation_uses_conservative_demand_not_unknown(self):
+        inventory = builder.quota_inventory_query("resources")
+        self.assertIn("case(not(SourceCredit), TargetCores", inventory)
+        self.assertIn("PowerState in~ ('running', 'stopped')", inventory)
+        check = builder.quota_check_query("resources")
+        self.assertIn("InPlaceShortfall = iff(QuotaUnknown, tolong('')", check)
+        self.assertNotIn("Unknown - source allocation unverified", check)
+        self.assertIn("Sufficient - conservative quota check", check)
+        self.assertIn("Insufficient quota (conservative)", check)
+        self.assertIn("ConservativeChecks > 0", builder.quota_summary_query("resources"))
 
     def test_graph_validation_retries_throttling_and_preserves_exhausted_failure(self):
         failure = subprocess.CompletedProcess([], 1, "", 'ERROR: {"code": "RateLimiting"}')

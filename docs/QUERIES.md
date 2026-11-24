@@ -2950,10 +2950,12 @@ resources
          TargetQuotaFamily = tostring(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]),
          SourceCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(VmSize)]) * tolong(Instances),
          TargetCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]) * tolong(Instances)
-| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)
-        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0
-        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,
-         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
+| extend SourceCredit = PowerState in~ ('running', 'stopped')
+        and isnotempty(SourceQuotaFamily) and isnotnull(SourceCores) and SourceCores >= 0,
+         Unresolved = isempty(TargetQuotaFamily) or isnull(TargetCores) or Instances < 0
+        or ComputePriority =~ 'Spot' or TargetCores < 0
+| extend RegionalIncrement = case(not(SourceCredit), TargetCores,
+        TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
 | extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,
         RegionalIncrement, TargetCores)
 | extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))
@@ -2965,7 +2967,7 @@ resources
         TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),
         SideBySideAdditionalCores = sum(TargetCores),
         InPlaceAdditionalCores = sum(InPlaceAdditional),
-        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        InPlaceUnverifiedResources = countif(not(SourceCredit)),
         UnresolvedResources = countif(Unresolved) by SubscriptionId, Region, Metric
 | join kind=leftouter (
 QuotaResources
@@ -2982,18 +2984,21 @@ QuotaResources
              or isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0
 | extend SideBySideShortfall = iff(QuotaUnknown, tolong(''),
              iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),
-         InPlaceShortfall = iff(QuotaUnknown or InPlaceUnverifiedResources > 0, tolong(''),
+         InPlaceShortfall = iff(QuotaUnknown, tolong(''),
              iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))
 | extend SideBySideStatus = case(QuotaUnknown,
             'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
          InPlaceStatus = case(QuotaUnknown,
-            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',
+            'Unknown - quota/metadata missing',
             InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only')
 | extend AdditionalCores = iff('{QuotaMigrationMode}' == 'inplace', InPlaceAdditionalCores, SideBySideAdditionalCores),
          Shortfall = iff('{QuotaMigrationMode}' == 'inplace', InPlaceShortfall, SideBySideShortfall),
          SelectedStatus = iff('{QuotaMigrationMode}' == 'inplace', InPlaceStatus, SideBySideStatus)
+| extend Conservative = '{QuotaMigrationMode}' == 'inplace' and InPlaceUnverifiedResources > 0
 | extend QuotaStatus = case(SelectedStatus startswith 'Unknown', SelectedStatus,
-              Shortfall > 0, 'Insufficient quota', 'Sufficient - quota only'),
+              Shortfall > 0 and Conservative, 'Insufficient quota (conservative)',
+              Shortfall > 0, 'Insufficient quota',
+              Conservative, 'Sufficient - conservative quota check', 'Sufficient - quota only'),
          Delta = iff(CurrentUnknown > 0 or TargetUnknown > 0, tolong(''), TargetCores - CurrentCores),
          CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),
          TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),
@@ -3012,7 +3017,8 @@ QuotaResources
         CurrentUnknown = sumif(CurrentUnknown, Metric == 'cores'),
         TargetUnknown = sumif(TargetUnknown, Metric == 'cores'),
         FailedChecks = countif(QuotaStatus startswith 'Insufficient'),
-        UnknownChecks = countif(QuotaStatus startswith 'Unknown')
+        UnknownChecks = countif(QuotaStatus startswith 'Unknown'),
+        ConservativeChecks = countif(QuotaStatus contains 'conservative')
     by SubscriptionId = tostring(SummaryScopes)
 | join kind=leftouter (
     ResourceContainers
@@ -3026,7 +3032,8 @@ QuotaResources
              iff('{QuotaScope}' == 'tenant', 'TENANT TOTAL (readable subscriptions)', 'SELECTED SUBSCRIPTIONS TOTAL'),
              coalesce(SubscriptionName, SubscriptionId)),
          QuotaStatus = case(FailedChecks > 0 and UnknownChecks > 0, 'Insufficient quota / incomplete checks',
-             FailedChecks > 0, 'Insufficient quota', UnknownChecks > 0, 'Unknown - incomplete checks', 'Sufficient - quota only')
+             FailedChecks > 0, 'Insufficient quota', UnknownChecks > 0, 'Unknown - incomplete checks',
+             ConservativeChecks > 0, 'Sufficient - conservative quota check', 'Sufficient - quota only')
 | order by TotalOrder asc, Scope asc
 | project Scope, ['Current cores'] = CurrentCores, ['Target cores'] = TargetCores,
           ['Delta (+/-)'] = TargetCores - CurrentCores, ['Quota status'] = QuotaStatus,
@@ -3192,10 +3199,12 @@ resources
          TargetQuotaFamily = tostring(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]),
          SourceCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(VmSize)]) * tolong(Instances),
          TargetCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]) * tolong(Instances)
-| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)
-        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0
-        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,
-         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
+| extend SourceCredit = PowerState in~ ('running', 'stopped')
+        and isnotempty(SourceQuotaFamily) and isnotnull(SourceCores) and SourceCores >= 0,
+         Unresolved = isempty(TargetQuotaFamily) or isnull(TargetCores) or Instances < 0
+        or ComputePriority =~ 'Spot' or TargetCores < 0
+| extend RegionalIncrement = case(not(SourceCredit), TargetCores,
+        TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
 | extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,
         RegionalIncrement, TargetCores)
 | summarize Resources = count(), Instances = sum(Instances),
@@ -3205,7 +3214,7 @@ resources
         InPlaceAdditionalFamilyCores = sum(FamilyIncrement),
         InPlaceAdditionalRegionalCores = sum(RegionalIncrement),
         UnresolvedResources = countif(Unresolved),
-        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        InPlaceUnverifiedResources = countif(not(SourceCredit)),
         TargetSizes = strcat_array(make_set(RecommendedTarget, 100), ', ')
     by SubscriptionId, Region, TargetQuotaFamily
 | extend TargetQuotaFamily = iff(isempty(TargetQuotaFamily), 'Unknown', TargetQuotaFamily),
@@ -3375,10 +3384,12 @@ resources
          TargetQuotaFamily = tostring(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]),
          SourceCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(VmSize)]) * tolong(Instances),
          TargetCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]) * tolong(Instances)
-| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)
-        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0
-        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,
-         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
+| extend SourceCredit = PowerState in~ ('running', 'stopped')
+        and isnotempty(SourceQuotaFamily) and isnotnull(SourceCores) and SourceCores >= 0,
+         Unresolved = isempty(TargetQuotaFamily) or isnull(TargetCores) or Instances < 0
+        or ComputePriority =~ 'Spot' or TargetCores < 0
+| extend RegionalIncrement = case(not(SourceCredit), TargetCores,
+        TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
 | extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,
         RegionalIncrement, TargetCores)
 | extend Metric = pack_array('cores', iff(isempty(TargetQuotaFamily), 'unknown', TargetQuotaFamily))
@@ -3390,7 +3401,7 @@ resources
         TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),
         SideBySideAdditionalCores = sum(TargetCores),
         InPlaceAdditionalCores = sum(InPlaceAdditional),
-        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        InPlaceUnverifiedResources = countif(not(SourceCredit)),
         UnresolvedResources = countif(Unresolved) by SubscriptionId, Region, Metric
 | join kind=leftouter (
 QuotaResources
@@ -3407,18 +3418,21 @@ QuotaResources
              or isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0
 | extend SideBySideShortfall = iff(QuotaUnknown, tolong(''),
              iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),
-         InPlaceShortfall = iff(QuotaUnknown or InPlaceUnverifiedResources > 0, tolong(''),
+         InPlaceShortfall = iff(QuotaUnknown, tolong(''),
              iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))
 | extend SideBySideStatus = case(QuotaUnknown,
             'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
          InPlaceStatus = case(QuotaUnknown,
-            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',
+            'Unknown - quota/metadata missing',
             InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only')
 | extend AdditionalCores = iff('{QuotaMigrationMode}' == 'inplace', InPlaceAdditionalCores, SideBySideAdditionalCores),
          Shortfall = iff('{QuotaMigrationMode}' == 'inplace', InPlaceShortfall, SideBySideShortfall),
          SelectedStatus = iff('{QuotaMigrationMode}' == 'inplace', InPlaceStatus, SideBySideStatus)
+| extend Conservative = '{QuotaMigrationMode}' == 'inplace' and InPlaceUnverifiedResources > 0
 | extend QuotaStatus = case(SelectedStatus startswith 'Unknown', SelectedStatus,
-              Shortfall > 0, 'Insufficient quota', 'Sufficient - quota only'),
+              Shortfall > 0 and Conservative, 'Insufficient quota (conservative)',
+              Shortfall > 0, 'Insufficient quota',
+              Conservative, 'Sufficient - conservative quota check', 'Sufficient - quota only'),
          Delta = iff(CurrentUnknown > 0 or TargetUnknown > 0, tolong(''), TargetCores - CurrentCores),
          CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),
          TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),
@@ -3591,10 +3605,12 @@ resources
          TargetQuotaFamily = tostring(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]),
          SourceCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(VmSize)]) * tolong(Instances),
          TargetCores = tolong(parse_json('{ ...lifecycle lookup, see note below... }')[tolower(RecommendedTarget)]) * tolong(Instances)
-| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)
-        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0
-        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,
-         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
+| extend SourceCredit = PowerState in~ ('running', 'stopped')
+        and isnotempty(SourceQuotaFamily) and isnotnull(SourceCores) and SourceCores >= 0,
+         Unresolved = isempty(TargetQuotaFamily) or isnull(TargetCores) or Instances < 0
+        or ComputePriority =~ 'Spot' or TargetCores < 0
+| extend RegionalIncrement = case(not(SourceCredit), TargetCores,
+        TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
 | extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,
         RegionalIncrement, TargetCores)
 | where isnotempty(TargetQuotaFamily)

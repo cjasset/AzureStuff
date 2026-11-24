@@ -700,10 +700,12 @@ def quota_inventory_query(base):
          TargetQuotaFamily = tostring(parse_json('{QuotaFamilyMap}')[tolower(RecommendedTarget)]),
          SourceCores = tolong(parse_json('{QuotaCoreMap}')[tolower(VmSize)]) * tolong(Instances),
          TargetCores = tolong(parse_json('{QuotaCoreMap}')[tolower(RecommendedTarget)]) * tolong(Instances)
-| extend Unresolved = isempty(TargetQuotaFamily) or isempty(SourceQuotaFamily)
-        or isnull(SourceCores) or isnull(TargetCores) or Instances < 0
-        or ComputePriority =~ 'Spot' or SourceCores < 0 or TargetCores < 0,
-         RegionalIncrement = iff(TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
+| extend SourceCredit = PowerState in~ ('running', 'stopped')
+        and isnotempty(SourceQuotaFamily) and isnotnull(SourceCores) and SourceCores >= 0,
+         Unresolved = isempty(TargetQuotaFamily) or isnull(TargetCores) or Instances < 0
+        or ComputePriority =~ 'Spot' or TargetCores < 0
+| extend RegionalIncrement = case(not(SourceCredit), TargetCores,
+        TargetCores > SourceCores, TargetCores - SourceCores, tolong(0))
 | extend FamilyIncrement = iff(SourceQuotaFamily == TargetQuotaFamily,
         RegionalIncrement, TargetCores)"""
 
@@ -723,7 +725,7 @@ def quota_demand_query(base):
         InPlaceAdditionalFamilyCores = sum(FamilyIncrement),
         InPlaceAdditionalRegionalCores = sum(RegionalIncrement),
         UnresolvedResources = countif(Unresolved),
-        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        InPlaceUnverifiedResources = countif(not(SourceCredit)),
         TargetSizes = strcat_array(make_set(RecommendedTarget, 100), ', ')
     by SubscriptionId, Region, TargetQuotaFamily
 | extend TargetQuotaFamily = iff(isempty(TargetQuotaFamily), 'Unknown', TargetQuotaFamily),
@@ -756,7 +758,7 @@ def quota_check_query(base):
         TargetUnknown = countif(isnull(TargetCores) or TargetCores < 0),
         SideBySideAdditionalCores = sum(TargetCores),
         InPlaceAdditionalCores = sum(InPlaceAdditional),
-        InPlaceUnverifiedResources = countif(PowerState !in~ ('running', 'stopped')),
+        InPlaceUnverifiedResources = countif(not(SourceCredit)),
         UnresolvedResources = countif(Unresolved) by SubscriptionId, Region, Metric
 | join kind=leftouter (
 """ + quota_rows_query() + """
@@ -766,18 +768,21 @@ def quota_check_query(base):
              or isnull(Limit) or isnull(Usage) or Limit < 0 or Usage < 0 or UnresolvedResources > 0
 | extend SideBySideShortfall = iff(QuotaUnknown, tolong(''),
              iff(SideBySideAdditionalCores > Limit - Usage, SideBySideAdditionalCores - (Limit - Usage), tolong(0))),
-         InPlaceShortfall = iff(QuotaUnknown or InPlaceUnverifiedResources > 0, tolong(''),
+         InPlaceShortfall = iff(QuotaUnknown, tolong(''),
              iff(InPlaceAdditionalCores > Limit - Usage, InPlaceAdditionalCores - (Limit - Usage), tolong(0)))
 | extend SideBySideStatus = case(QuotaUnknown,
             'Unknown - quota/metadata missing', SideBySideShortfall > 0, 'Not met - quota shortfall', 'Met - quota only'),
          InPlaceStatus = case(QuotaUnknown,
-            'Unknown - quota/metadata missing', InPlaceUnverifiedResources > 0, 'Unknown - source allocation unverified',
+            'Unknown - quota/metadata missing',
             InPlaceShortfall > 0, 'Not met - quota shortfall', 'Met - quota only')
 | extend AdditionalCores = iff('{QuotaMigrationMode}' == 'inplace', InPlaceAdditionalCores, SideBySideAdditionalCores),
          Shortfall = iff('{QuotaMigrationMode}' == 'inplace', InPlaceShortfall, SideBySideShortfall),
          SelectedStatus = iff('{QuotaMigrationMode}' == 'inplace', InPlaceStatus, SideBySideStatus)
+| extend Conservative = '{QuotaMigrationMode}' == 'inplace' and InPlaceUnverifiedResources > 0
 | extend QuotaStatus = case(SelectedStatus startswith 'Unknown', SelectedStatus,
-              Shortfall > 0, 'Insufficient quota', 'Sufficient - quota only'),
+              Shortfall > 0 and Conservative, 'Insufficient quota (conservative)',
+              Shortfall > 0, 'Insufficient quota',
+              Conservative, 'Sufficient - conservative quota check', 'Sufficient - quota only'),
          Delta = iff(CurrentUnknown > 0 or TargetUnknown > 0, tolong(''), TargetCores - CurrentCores),
          CurrentCores = iff(CurrentUnknown > 0, tolong(''), CurrentCores),
          TargetCores = iff(TargetUnknown > 0, tolong(''), TargetCores),
@@ -800,7 +805,8 @@ def quota_summary_query(base):
         CurrentUnknown = sumif(CurrentUnknown, Metric == 'cores'),
         TargetUnknown = sumif(TargetUnknown, Metric == 'cores'),
         FailedChecks = countif(QuotaStatus startswith 'Insufficient'),
-        UnknownChecks = countif(QuotaStatus startswith 'Unknown')
+        UnknownChecks = countif(QuotaStatus startswith 'Unknown'),
+        ConservativeChecks = countif(QuotaStatus contains 'conservative')
     by SubscriptionId = tostring(SummaryScopes)
 | join kind=leftouter (
     ResourceContainers
@@ -814,7 +820,8 @@ def quota_summary_query(base):
              iff('{QuotaScope}' == 'tenant', 'TENANT TOTAL (readable subscriptions)', 'SELECTED SUBSCRIPTIONS TOTAL'),
              coalesce(SubscriptionName, SubscriptionId)),
          QuotaStatus = case(FailedChecks > 0 and UnknownChecks > 0, 'Insufficient quota / incomplete checks',
-             FailedChecks > 0, 'Insufficient quota', UnknownChecks > 0, 'Unknown - incomplete checks', 'Sufficient - quota only')
+             FailedChecks > 0, 'Insufficient quota', UnknownChecks > 0, 'Unknown - incomplete checks',
+             ConservativeChecks > 0, 'Sufficient - conservative quota check', 'Sufficient - quota only')
 | order by TotalOrder asc, Scope asc
 | project Scope, ['Current cores'] = CurrentCores, ['Target cores'] = TargetCores,
           ['Delta (+/-)'] = TargetCores - CurrentCores, ['Quota status'] = QuotaStatus,
@@ -902,7 +909,7 @@ def quota_planning_items(base, regions, families):
             ("QuotaScope", "Planning scope", "selected",
              [("selected", "Selected subscriptions"), ("tenant", "Tenant - all readable subscriptions")]),
             ("QuotaMigrationMode", "Migration approach", "inplace",
-             [("sidebyside", "Side-by-side (keep sources)"), ("inplace", "In-place (validate allocation)")]),
+             [("sidebyside", "Side-by-side (keep sources)"), ("inplace", "In-place (conservative if needed)")]),
             ("QuotaDetails", "Show detail", "none",
              [("none", "Summary only"), ("migration", "Migration breakdown"),
               ("checks", "Quota checks and shortfalls"), ("headroom", "Tenant headroom / quota group discussion"),
@@ -925,10 +932,10 @@ def quota_planning_items(base, regions, families):
             "**Current cores** = source quota-vCPUs, including deallocated inventory; "
             "**Target cores** = target quota-vCPUs; **Delta** = target minus current, not the quota request.\n\n"
             "**In-place (default):** resize existing VMs. Regional quota models positive core growth; "
-            "a different target family still needs full target-family cores. Requires verified source allocation; "
+            "a different target family still needs full target-family cores. Unverified sources get no core credit; "
             "this model does not confirm that resizing is supported.\n\n"
             "**Side-by-side:** deploy replacements while keeping sources allocated; quota must cover both fleets.\n\n"
-            "**Red:** insufficient quota. **Amber:** incomplete evidence/unverified allocation. "
+            "**Conservative:** full target cores for deallocated/unknown sources. **Red:** insufficient quota. **Amber:** missing quota/target data. "
             "**Green:** quota only, not physical capacity or migration approval. Missing targets stay Unknown; "
             "spare quota elsewhere cannot cancel a shortfall.\n\n"
             "Independent of Live target availability. **Show detail** opens breakdowns, shortfalls, groups or the key.",
@@ -943,36 +950,30 @@ def quota_planning_items(base, regions, families):
                      "items": quota_group_items(regions, families)}},
         conditional_text("quota-key", "QuotaDetails", "key",
             "### Column key & assumptions\n\n"
-            "A compact total plus one row per subscription. Change **Planning scope** to compare selected "
-            "subscriptions with all subscriptions you can read in the current tenant. The tenant view "
-            "cannot include subscriptions hidden by permissions. Other workbook tabs retain their original scope.\n\n"
+            "Totals plus subscription rows. **Planning scope:** selected or all readable tenant "
+            "subscriptions; other tabs keep their scope.\n\n"
             "| Column | Key |\n| --- | --- |\n"
-            "| Current cores | Captured quota-vCPUs of retirement/EOL sources, not all workloads in the subscription. VMSS capacity is counted once; deallocated inventory is included, not asserted to consume quota today. |\n"
-            "| Target cores | Quota-vCPUs needed by the selected target scenario in the current regions. Default remains V5-first; V5/V6/V7-only scenarios use their independent compatible path targets. Missing targets stay Unknown, never fall back to another generation. |\n"
-            "| Delta (+/-) | Target minus current: positive means growth, negative means reduction. **Not** the quota request size. |\n"
-            "| Quota status | **Red: Insufficient quota** if any region or destination family is short. **Orange: Unknown** for missing quota/metadata or unverified in-place allocation. Green means quota only, not migration approval. |\n\n"
-            "**Every affected subscription/region/family is checked automatically**, using indexed Compute "
-            "`QuotaResources` usage and limits. Both regional and family checks must pass; spare quota "
-            "in another subscription or region never cancels a shortfall. Indexing is eventually consistent: "
-            "refresh and recheck with Azure Quotas/CLI before migration. Missing records are Unknown, not unlimited.\n\n"
-            "**Migration approach:** see the definitions beside the selector. In-place grants no negative "
-            "credits for downsizing other VMs. Spot or deallocated/unknown allocations stay Unknown. "
-            "Delta is unchanged by the approach.\n\n"
-            "**Show detail** opens one optional table at a time. Quota checks explains **AdditionalCores**, "
-            "**Available** (limit minus all current usage), and **Shortfall** (additional minus available, "
-            "floored at zero). Blank shortfall means Unknown. Regional demand includes all target families. "
-            "**Tenant headroom** shows unused quota now in readable subscriptions for relevant regions/families, "
-            "capped by regional headroom. It is not surplus after their planned migrations or a shared pool: "
-            "verify quota-group membership, eligibility, limits and approvals before any reallocation. "
-            "The separate **Live quota-group inspector** checks one selected management group, quota group, "
-            "subscription, region and metric. It does not certify tenant-wide membership, donor eligibility "
-            "or transferability, and never moves quota.\n\n"
-            "**Quota is not physical capacity.** SKU/zone restrictions, policy, boot/driver compatibility "
-            "and actual allocation still require validation. Targets use captured SKU `vCPUs`, not constrained "
-            "`vCPUsAvailable`. Lifecycle display filters do not remove retirement/EOL demand. "
-            "The scenario does not change Inventory recommendations or approve a path. "
-            "Service quotas, autoscaler maxima, surge and Batch demand require separate planning. "
-            "For request procedures, see [VM vCPU quotas]"
+            "| Current cores | Retirement/EOL configured quota-vCPUs including deallocated inventory; VMSS counted once. Not subscription usage. |\n"
+            "| Target cores | Scenario quota-vCPUs in current regions. Independent V5/V6/V7 paths; no fallback. Missing targets stay Unknown. |\n"
+            "| Delta (+/-) | Target minus current, not the quota request; independent of approach. |\n"
+            "| Quota status | Red: regional/family shortfall. Orange: missing quota/target data or Spot. Green: quota only. Conservative: no unverified source credit. |\n\n"
+            "**Every affected subscription/region/family is checked automatically** against indexed Compute "
+            "`QuotaResources`. Both constraints must pass; spare quota elsewhere cannot cancel shortfalls. "
+            "Indexing lags: recheck Azure Quotas/CLI before migration. Missing records "
+            "are Unknown, not unlimited.\n\n"
+            "**In-place** grants source credit only for running/stopped allocations with known source metadata. "
+            "Otherwise full target cores are conservative; downsizing gives no negative credits. "
+            "A conservative shortfall does not prove every optimized resize fails.\n\n"
+            "**Quota checks:** AdditionalCores is required headroom; Available is limit minus current usage; "
+            "Shortfall is max(additional minus available, zero); blank means Unknown. Regional demand "
+            "includes all families. **Tenant headroom** is unused family quota capped by regional headroom, "
+            "not post-migration surplus or pooled quota. **Live quota-group inspector** checks one selected "
+            "management group/group/subscription/region/metric, not tenant-wide membership or transfer eligibility. "
+            "No quota is moved; verify membership, eligibility, limits and approvals separately.\n\n"
+            "**Quota is not physical capacity or resize approval.** Validate SKU/zone access, policy, boot/drivers "
+            "and allocation. Targets use `vCPUs`, not constrained `vCPUsAvailable`. Lifecycle filters "
+            "do not remove demand; scenarios do not change Inventory recommendations. "
+            "Plan service quotas, autoscaler maxima, surge and Batch separately. See [VM vCPU quotas]"
             "(https://learn.microsoft.com/azure/quotas/per-vm-quota-requests)."),
     ]
 
