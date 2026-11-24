@@ -28,7 +28,11 @@ class QuotaGroupEvidenceTests(unittest.TestCase):
             request = json.loads(self.parameters[name]["query"])
             self.assertEqual((request["method"], request["path"]), groups.ENDPOINTS[name])
             self.assertEqual(request["method"], "GETARRAY")
-            self.assertEqual(request["transformers"][0]["settings"]["tablePath"], "$.value[*]")
+            settings = request["transformers"][0]["settings"]
+            self.assertEqual(settings["tablePath"], "$")
+            self.assertEqual(settings["columns"],
+                             [{"columnid": "value", "path": "$.id"},
+                              {"columnid": "label", "path": "$.name"}])
 
     def test_records_preserve_envelopes_and_native_sources(self):
         for name, source in (("QuotaGroupMemberRecord", "group-quota-membership"),
@@ -75,6 +79,15 @@ class QuotaGroupEvidenceTests(unittest.TestCase):
             request["method"] = "POST"
             target["query"] = json.dumps(request)
             self.assertTrue(any("read-only" in e for e in structure_check(workbook)))
+        for name in ("QuotaGroupManagementGroup", "QuotaGroupId"):
+            workbook = copy.deepcopy(self.workbook)
+            items = {i["name"]: i for i in walk_items(workbook["items"])}
+            target = next(p for p in items["group-quota-controls"]["content"]["parameters"]
+                          if p["name"] == name)
+            request = json.loads(target["query"])
+            request["transformers"][0]["settings"]["tablePath"] = "$.value[*]"
+            target["query"] = json.dumps(request)
+            self.assertTrue(any("array-root" in e for e in structure_check(workbook)))
 
     def test_raw_evidence_is_opt_in_and_verified_is_not_green(self):
         self.assertEqual(self.parameters["QuotaGroupEvidence"]["value"], "summary")

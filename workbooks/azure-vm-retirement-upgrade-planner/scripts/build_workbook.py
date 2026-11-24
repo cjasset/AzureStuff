@@ -985,7 +985,7 @@ def quota_group_items(regions, families):
         parameters.append({
             "version": "KqlParameterItem/1.0", "name": name, "label": label,
             "type": 2, "isRequired": True, "queryType": 12,
-            "query": group_arm_request(name, [("value", "$.id"), ("label", "$.name")], "$.value[*]"),
+            "query": group_arm_request(name, [("value", "$.id"), ("label", "$.name")]),
             "typeSettings": {"showDefault": False},
         })
     parameters.append({

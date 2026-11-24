@@ -254,6 +254,13 @@ def structure_check(wb):
                     problems.append(f"{name}: unexpected live inspection endpoint/scope")
                 if request.get("data") is not None or request.get("headers"):
                     problems.append(f"{name}: unexpected live inspection body/headers")
+                if name in ("QuotaGroupManagementGroup", "QuotaGroupId"):
+                    settings = next((t.get("settings", {}) for t in request.get("transformers", [])
+                                     if t.get("type") == "jsonpath"), {})
+                    if settings.get("tablePath") != "$" or settings.get("columns") != [
+                            {"columnid": "value", "path": "$.id"},
+                            {"columnid": "label", "path": "$.name"}]:
+                        problems.append(f"{name}: GETARRAY dropdown requires array-root id/name binding")
             if isinstance(c, dict) and c.get("queryType") == 1:
                 expected = ["{QuotaAllSubscriptions}"] if node.get("name", "").startswith("quota-") else ["{Subscriptions}"]
                 if c.get("crossComponentResources") != expected:

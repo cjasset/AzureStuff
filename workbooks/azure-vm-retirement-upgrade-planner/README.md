@@ -504,6 +504,12 @@ changes membership, moves quota or requests increases. See
 Quota-group read permissions are inherited from the owning management group;
 subscription Reader access alone does not establish access to that group.
 
+Select **Readable management group** first, then **Quota group**. Lists can take
+a few seconds to load; a required-but-empty selection is not evidence that no
+management group exists. Both dropdowns project `id`/`name` from the array-root
+rows returned by native `GETARRAY`, not the REST response's `value` envelope.
+Validation covers that binding and paged/empty list shapes as well as direct API access.
+
 Missing CPU/family metadata, missing quota, or Spot workloads keep the relevant
 estimate **Unknown**, not unlimited or zero shortfall. Duplicate quota metrics are
 also Unknown. ARG indexing is eventually consistent: refresh and recheck using
